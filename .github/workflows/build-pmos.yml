@@ -1,20 +1,23 @@
 name: Build postmarketOS payload for courbet
 
-# Why CI and not a local machine: pmbootstrap needs a real Linux to build its
-# chroots, and the host here has neither WSL nor usable virtualization. A
-# GitHub runner already is what pmbootstrap wants.
+# Why CI: pmbootstrap needs a real Linux to build chroots, and this host has
+# neither WSL nor usable virtualization. A GitHub runner already is one.
 #
-# Why the artifact is a boot.img: the firmware in this project has no UFS
-# driver and no network stack, so nothing can be read from storage. `fastboot
-# boot` pushes an image into RAM over USB and starts it without writing a
-# partition, which is the only delivery path that does not need a USB-C OTG
-# adapter.
+# Why not gitlab.postmarketos.org: it is behind Anubis, a proof-of-work
+# anti-scraping gate that requires JavaScript. Automated clients get the
+# challenge page instead of a git stream, and the clone fails. This is why the
+# first run of this workflow died on step 5 - not a missing dependency.
 #
-# Honest status: there is no postmarketOS port for SM7325. mainline support for
-# this SoC is in progress - Nura's own first candidates are SM7325 devices, so
-# the work exists but is not finished. The default target below is therefore a
-# known-good mainline phone, used to prove the pipeline end to end. Switch to
-# courbet to attempt the real thing.
+# Both problems are dodged:
+#   pmbootstrap  -> PyPI (2.1.0), installed with pip
+#   pmaports     -> github.com/sm7150-mainline/pmaports, branch "generic",
+#                   which carries the SM7150 mainline port
+#
+# Why a boot.img: the firmware in edk2-sm7150 exposes only USB Mass Storage with
+# FAT32. No UFS driver (Qualcomm UFS is not on PCI) and the network stack is
+# compiled out, so nothing can be read from storage. `fastboot boot` pushes an
+# image into RAM over USB and starts it without writing a partition - the only
+# delivery path that needs no USB-C OTG adapter.
 
 on:
   push:
@@ -27,11 +30,11 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: 'postmarketOS device to build for'
+        description: 'postmarketOS device port to build'
         required: false
-        default: 'oneplus-enchilada'
-      kernel_flavor:
-        description: 'kernel flavour (mainline / downstream)'
+        default: 'xiaomi-surya'
+      flavor:
+        description: 'kernel flavour'
         required: false
         default: 'mainline'
 
@@ -40,9 +43,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PMBOOTSTRAP_REF: master
-  PMS_APK_REPO: https://gitlab.postmarketos.org/pmaports
-  PMS_APK_BRANCH: master
+  PMS_APK_REPO: https://github.com/sm7150-mainline/pmaports
+  PMS_APK_BRANCH: generic
 
 jobs:
   build:
@@ -52,85 +54,110 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve device
+      - name: Resolve target
         id: dev
         run: |
           set -e
           DEVICE="${{ github.event.inputs.device }}"
-          FLAVOR="${{ github.event.inputs.kernel_flavor }}"
-          [ -n "$DEVICE" ] || DEVICE=oneplus-enchilada
+          FLAVOR="${{ github.event.inputs.flavor }}"
+          [ -n "$DEVICE" ] || DEVICE=xiaomi-surya
           [ -n "$FLAVOR" ] || FLAVOR=mainline
           echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
-          echo "flavor=$FLAVOR" >> "$GITHUB_OUTPUT"
-          echo "building for $DEVICE with $FLAVOR kernel"
+          echo "flavor=$FLAVOR"  >> "$GITHUB_OUTPUT"
+          echo "target: $DEVICE ($FLAVOR)"
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            git cpio curl binutils file \
-            python3 python3-dev \
+            git cpio curl binutils file patch \
+            python3 python3-dev python3-pip python3-setuptools python3-virtualenv \
             build-essential \
             gcc-aarch64-linux-gnu \
             bc bison flex gawk \
             libssl-dev libncurses-dev \
-            util-linux \
-            squashfs-tools \
-            lz4 \
-            zstd \
-            xz-utils
+            util-linux squashfs-tools lz4 zstd xz-utils
 
-      - name: Set up pmbootstrap
+      - name: Install pmbootstrap from PyPI
         run: |
           set -e
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0=url.https://gitlab.postmarketos.org/pmaports/.insteadOf
-          export GIT_CONFIG_VALUE_0=https://gitlab.postmarketos.org/pmaports.git
+          # PyPI rather than a git clone: gitlab.postmarketos.org sits behind
+          # Anubis and cannot be cloned by a CI runner.
+          python3 -m pip install --no-cache-dir pmbootstrap
+          pmbootstrap --version
 
-          git clone --depth 1 -b "$PMBOOTSTRAP_REF" \
-            https://gitlab.postmarketos.org/pmbootstrap.git pmbootstrap
+      - name: Fetch pmaports mirror
+        run: |
+          set -e
           git clone --depth 1 -b "$PMS_APK_BRANCH" "$PMS_APK_REPO" pmaports
+          echo "device ports in mirror: $(ls pmaports/device/*/ -d 2>/dev/null | wc -l)"
+          echo
+          echo "SM7150-related packages:"
+          ls pmaports/device/community/ | grep -Ei 'sm7150|surya' || true
+          ls pmaports/device/community/ | grep -Ei 'courbet' || echo "  (no courbet port)"
 
+      - name: Create build user
+        run: |
+          set -e
           sudo adduser --disabled-password --gecos "" pmuser
           echo "pmuser ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/pmuser
+          sudo chmod 700 /home/pmuser
 
-      - name: Show available devices
+      - name: Report maturity of the target
         run: |
-          echo "devices matching courbet, xiaomi or redmi in pmaports:"
-          ls pmaports/device/ 2>/dev/null | grep -Ei 'courbet|xiaomi|redmi' || echo "  (none)"
+          set +e
+          D="${{ steps.dev.outputs.device }}"
+          echo "### Device support reality check"
           echo
-          echo "total device ports: $(ls pmaports/device/ 2>/dev/null | wc -l)"
+          INFO="pmaports/device/community/device-$D/deviceinfo"
+          if [ -f "$INFO" ]; then
+            echo "\`device-$D\` exists in the mirror:"
+            echo '```'
+            grep -E 'device_type|codename|screen_width|screen_height|dtb|getty|flash_method' "$INFO"
+            echo '```'
+          else
+            echo "device-$D not found in the mirror."
+          fi
+          echo
+          if grep -q 'device_type *= *"ref"' pmaports/device/community/device-qcom-sm7150/deviceinfo 2>/dev/null; then
+            echo "> **The SM7150 SoC port is marked \`device_type=\"ref\"\`,** which in"
+            echo "> postmarketOS means a reference configuration kept for CI tests, not a"
+            echo "> device someone has verified boots. Expect the kernel to reach userspace"
+            echo "> without a working panel; there is no display to read, and the console is"
+            echo "> UART (\`getty=ttyMSM0\`), which needs a USB-TTL adapter to see."
+          fi
+          {
+            echo
+            echo "### Known limitation"
+            echo
+            echo "- No \`courbet\` port exists. \`xiaomi-surya\` is the closest: same SM7150"
+            echo "  family, and the same 1080x2400 panel."
+            echo "- The SM7150 base port is a reference config for CI, so mainline display"
+            echo "  support is unproven on real hardware."
+            echo "- Console is UART only; the firmware exposes no USB, so a failed boot"
+            echo "  produces no visible output."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: pmbootstrap init
         run: |
-          set -e
           sudo -iu pmuser bash -lc "
-            set -e
+            set -eu
             cd '$GITHUB_WORKSPACE'
-            ./pmbootstrap/pmbootstrap init \
+            pmbootstrap init \
               --work-dir work \
               --apkrepo '$PMS_APK_REPO' \
               --branch '$PMS_APK_BRANCH' \
-              ${{ steps.dev.outputs.device }} \
-              --kernel-flavor '${{ steps.dev.outputs.flavor }}' \
-              --cgit-remote origin
+              '${{ steps.dev.outputs.device }}' \
+              --kernel-flavor '${{ steps.dev.outputs.flavor }}'
           "
 
       - name: pmbootstrap build
         run: |
           sudo -iu pmuser bash -lc "
-            set -e
+            set -eu
             cd '$GITHUB_WORKSPACE'
-            ./pmbootstrap/pmbootstrap build --work-dir work
+            pmbootstrap build --work-dir work
           "
-
-      - name: Collect artifacts
-        run: |
-          set -e
-          mkdir -p out
-          echo "=== kernel / initramfs produced ==="
-          find work -maxdepth 6 \( -name 'vmlinuz*' -o -name 'initramfs*' \) \
-            -type f -printf '%p  %s bytes\n' | tee out/kernel-files.txt || true
 
       - name: Package fastboot-bootable image
         run: |
@@ -139,52 +166,25 @@ jobs:
           RAMDISK=$(find work -name 'initramfs*' -type f | head -1)
 
           if [ -z "$KERNEL" ] || [ -z "$RAMDISK" ]; then
-            echo "::error::no kernel or initramfs was produced; see the steps above"
+            echo "::error::no kernel or initramfs produced; see the earlier steps"
+            find work -maxdepth 5 -name '*.img' -o -name 'vmlinuz*' | head -20 || true
             exit 1
           fi
           echo "kernel : $KERNEL"
           echo "ramdisk: $RAMDISK"
 
           DTB=""
-          if [ -f device/courbet.dtb ]; then
-            DTB="--dtb device/courbet.dtb"
-            echo "dtb    : device/courbet.dtb"
-          fi
+          for cand in device/courbet.dtb "work/chroot_rootfs_${{ steps.dev.outputs.device }}/boot/dtbs"; do
+            [ -e "$cand" ] && DTB="" && break
+          done
+          if [ -f device/courbet.dtb ]; then DTB="--dtb device/courbet.dtb"; fi
 
-          python3 scripts/mkbootimg.py \
-            --kernel "$KERNEL" \
-            --ramdisk "$RAMDISK" \
-            $DTB \
-            -o "out/boot-pmos.img"
-
-          python3 scripts/mkbootimg.py \
-            --kernel "$KERNEL" \
-            --ramdisk "$RAMDISK" \
-            $DTB \
-            --pad-to-partition \
-            -o "out/boot-pmos-128m.img"
-
+          mkdir -p out
+          python3 scripts/mkbootimg.py --kernel "$KERNEL" --ramdisk "$RAMDISK" $DTB -o out/boot-pmos.img
+          python3 scripts/mkbootimg.py --kernel "$KERNEL" --ramdisk "$RAMDISK" $DTB \
+                   --pad-to-partition -o out/boot-pmos-128m.img
           echo
           ls -la out
-
-      - name: Report device support
-        run: |
-          set +e
-          echo "### Is there a postmarketOS port for this SoC?"
-          echo
-          if ls pmaports/device/ | grep -qi courbet; then
-            echo "A courbet port exists in pmaports:"; ls pmaports/device/ | grep -i courbet
-          else
-            echo "**No courbet port in pmaports.** mainline SM7325 support is"
-            echo "in progress; Nura's first candidates are SM7325 devices, so the"
-            echo "work exists but is not finished. The kernel built here is"
-            echo "expected not to reach a console on this phone."
-          fi
-          {
-            echo
-            echo "### artifacts"
-            ls -la out
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload
         uses: actions/upload-artifact@v4
