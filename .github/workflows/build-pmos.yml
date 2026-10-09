@@ -79,7 +79,10 @@ jobs:
             util-linux squashfs-tools lz4 zstd xz-utils
 
       - name: Install pmbootstrap
-        run: ./scripts/install-pmbootstrap.sh
+        # Invoke through bash rather than as ./script: Git for Windows does not
+        # record the executable bit, so the file arrives without +x and the
+        # direct invocation dies with exit 126, "Permission denied".
+        run: bash ./scripts/install-pmbootstrap.sh
 
       - name: Fetch pmaports mirror
         run: |
