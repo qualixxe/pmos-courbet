@@ -162,7 +162,9 @@ jobs:
           #
           # pmaports is copied into the build dir rather than referenced in the
           # workspace, because pmuser cannot traverse /home/runner.
-          cp -a pmaports "$BUILD_DIR/pmaports"
+          # As root: the build dir belongs to pmuser at 0755, so runner cannot
+          # write into it.
+          sudo cp -a pmaports "$BUILD_DIR/pmaports"
           sudo chown -R pmuser:pmuser "$BUILD_DIR/pmaports"
 
           sudo mkdir -p /home/pmuser/.config
