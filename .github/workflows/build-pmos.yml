@@ -185,7 +185,7 @@ jobs:
           set -o pipefail
           sudo -u pmuser -H bash -c "
             cd '$BUILD_DIR' || exit 1
-            pmbootstrap --details-to-stdout -y -w '$BUILD_DIR/work' init
+            yes '' | pmbootstrap --details-to-stdout -y -w '$BUILD_DIR/work' init
           " 2>&1 | tee "$RUNNER_TEMP/init.log"
           echo "exit: ${PIPESTATUS[0]}"
 
