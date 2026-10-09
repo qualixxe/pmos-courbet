@@ -78,22 +78,8 @@ jobs:
             libssl-dev libncurses-dev \
             util-linux squashfs-tools lz4 zstd xz-utils
 
-      - name: Install pmbootstrap into a venv
-        run: |
-          set -e
-          # PyPI rather than a git clone: gitlab.postmarketos.org sits behind
-          # Anubis and cannot be cloned by a CI runner.
-          #
-          # A venv, not a plain pip install: Ubuntu 22.04 marks the system
-          # interpreter as externally managed (PEP 668), so pip refuses to
-          # install anything into it.
-          python3 -m venv /opt/pmbootstrap
-          /opt/pmbootstrap/bin/pip install --no-cache-dir --upgrade pip
-          /opt/pmbootstrap/bin/pip install --no-cache-dir pmbootstrap
-          /opt/pmbootstrap/bin/pmbootstrap --version
-          sudo mkdir -p /usr/local/bin
-          sudo ln -sf /opt/pmbootstrap/bin/pmbootstrap /usr/local/bin/pmbootstrap
-          pmbootstrap --version
+      - name: Install pmbootstrap
+        run: ./scripts/install-pmbootstrap.sh
 
       - name: Fetch pmaports mirror
         run: |
