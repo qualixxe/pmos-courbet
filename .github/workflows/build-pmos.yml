@@ -4,20 +4,14 @@ name: Build postmarketOS payload for courbet
 # neither WSL nor usable virtualization. A GitHub runner already is one.
 #
 # Why not gitlab.postmarketos.org: it is behind Anubis, a proof-of-work
-# anti-scraping gate that requires JavaScript. Automated clients get the
-# challenge page instead of a git stream, and the clone fails. This is why the
-# first run of this workflow died on step 5 - not a missing dependency.
-#
-# Both problems are dodged:
-#   pmbootstrap  -> PyPI (2.1.0), installed with pip
-#   pmaports     -> github.com/sm7150-mainline/pmaports, branch "generic",
-#                   which carries the SM7150 mainline port
+# anti-scraping gate that needs JavaScript. Automated clients get the challenge
+# page instead of a git stream and the clone fails.
 #
 # Why a boot.img: the firmware in edk2-sm7150 exposes only USB Mass Storage with
-# FAT32. No UFS driver (Qualcomm UFS is not on PCI) and the network stack is
+# FAT32. No UFS driver - Qualcomm UFS is not on PCI - and the network stack is
 # compiled out, so nothing can be read from storage. `fastboot boot` pushes an
-# image into RAM over USB and starts it without writing a partition - the only
-# delivery path that needs no USB-C OTG adapter.
+# image into RAM over USB and starts it without writing a partition, which is
+# the only delivery path that needs no USB-C OTG adapter.
 
 on:
   push:
@@ -45,6 +39,7 @@ concurrency:
 env:
   PMS_APK_REPO: https://github.com/sm7150-mainline/pmaports
   PMS_APK_BRANCH: generic
+  BUILD_DIR: /home/pmuser/pmbuild
 
 jobs:
   build:
@@ -71,7 +66,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             git cpio curl binutils file patch \
-            python3 python3-dev python3-pip python3-setuptools python3-virtualenv \
+            python3 python3-dev python3-pip python3-setuptools python3-venv \
             build-essential \
             gcc-aarch64-linux-gnu \
             bc bison flex gawk \
@@ -79,20 +74,9 @@ jobs:
             util-linux squashfs-tools lz4 zstd xz-utils
 
       - name: Install pmbootstrap
-        # Invoke through bash rather than as ./script: Git for Windows does not
-        # record the executable bit, so the file arrives without +x and the
-        # direct invocation dies with exit 126, "Permission denied".
+        # Invoke through bash: Git for Windows does not record the executable
+        # bit, so a direct ./ invocation dies with exit 126.
         run: bash ./scripts/install-pmbootstrap.sh
-
-      - name: Fetch pmaports mirror
-        run: |
-          set -e
-          git clone --depth 1 -b "$PMS_APK_BRANCH" "$PMS_APK_REPO" pmaports
-          echo "device ports in mirror: $(ls pmaports/device/*/ -d 2>/dev/null | wc -l)"
-          echo
-          echo "SM7150-related packages:"
-          ls pmaports/device/community/ | grep -Ei 'sm7150|surya' || true
-          ls pmaports/device/community/ | grep -Ei 'courbet' || echo "  (no courbet port)"
 
       - name: Create build user
         run: |
@@ -100,11 +84,31 @@ jobs:
           sudo adduser --disabled-password --gecos "" pmuser
           echo "pmuser ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/pmuser
           sudo chmod 700 /home/pmuser
-          # The build runs as pmuser but the work dir lives in the workspace,
-          # which is owned by `runner`. Without this pmbootstrap cannot create
-          # it, and the packaging step then finds no output at all.
-          sudo chmod -R a+rwX "$GITHUB_WORKSPACE"
-          echo "workspace writable by: $(stat -c '%A %U' "$GITHUB_WORKSPACE")"
+
+      - name: Prepare the build directory
+        run: |
+          set -e
+          # The build cannot run in the workspace. The workspace itself is
+          # 0777, but /home/runner above it is 0700, so a different user cannot
+          # traverse into it no matter what the workspace's own mode says.
+          # chmod'ing the workspace does not help, and the failure showed up as
+          # "cd: Permission denied" with pmbootstrap then exiting silently.
+          #
+          # So the build lives in the build user's own home, and results are
+          # copied back afterwards.
+          sudo install -d -o pmuser -g pmuser -m 0755 "$BUILD_DIR"
+          sudo -u pmuser -H bash -c "cd '$BUILD_DIR' && pwd && touch .w && rm .w && echo writable"
+          echo "build dir: $BUILD_DIR"
+
+      - name: Fetch pmaports mirror
+        run: |
+          set -e
+          git clone --depth 1 -b "$PMS_APK_BRANCH" "$PMS_APK_REPO" pmaports
+          echo "device port categories: $(ls -d pmaports/device/*/ | wc -l)"
+          echo
+          echo "SM7150-related packages:"
+          ls pmaports/device/community/ | grep -Ei 'sm7150|surya' || echo "  (none)"
+          ls pmaports/device/community/ | grep -Ei 'courbet' || echo "  (no courbet port)"
 
       - name: Report maturity of the target
         run: |
@@ -123,84 +127,84 @@ jobs:
           fi
           echo
           if grep -q 'device_type *= *"ref"' pmaports/device/community/device-qcom-sm7150/deviceinfo 2>/dev/null; then
-            echo "> **The SM7150 SoC port is marked \`device_type=\"ref\"\`,** which in"
-            echo "> postmarketOS means a reference configuration kept for CI tests, not a"
-            echo "> device someone has verified boots. Expect the kernel to reach userspace"
-            echo "> without a working panel; there is no display to read, and the console is"
-            echo "> UART (\`getty=ttyMSM0\`), which needs a USB-TTL adapter to see."
+            echo '> **The SM7150 SoC port is `device_type="ref"`,** which in postmarketOS'
+            echo '> means a reference configuration kept for CI tests, not a device'
+            echo '> someone has verified boots. Expect the kernel to reach userspace'
+            echo '> without a working panel.'
           fi
           {
             echo
-            echo "### Known limitation"
+            echo "### Known limitations"
             echo
             echo "- No \`courbet\` port exists. \`xiaomi-surya\` is the closest: same SM7150"
             echo "  family, and the same 1080x2400 panel."
-            echo "- The SM7150 base port is a reference config for CI, so mainline display"
+            echo "- The SM7150 base port is a CI reference config, so mainline display"
             echo "  support is unproven on real hardware."
-            echo "- Console is UART only; the firmware exposes no USB, so a failed boot"
-            echo "  produces no visible output."
+            echo "- Console is UART (\`getty=ttyMSM0\`) and the firmware exposes no USB, so a"
+            echo "  failed boot gives no visible output and no log."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: pmbootstrap init
         run: |
-          # Not `sudo -iu pmuser bash -lc`: a login shell resets PATH and the
-          # environment, and the tool was exiting 0 in complete silence, which
-          # is what hid the real failure. Capture everything instead.
+          set -o pipefail
           sudo -u pmuser -H bash -c "
-            cd '$GITHUB_WORKSPACE' || exit 1
-            pwd
-            which pmbootstrap
+            cd '$BUILD_DIR' || exit 1
             pmbootstrap init \
-              --work-dir '$GITHUB_WORKSPACE/work' \
+              --work-dir '$BUILD_DIR/work' \
               --apkrepo '$PMS_APK_REPO' \
               --branch '$PMS_APK_BRANCH' \
               '${{ steps.dev.outputs.device }}' \
               --kernel-flavor '${{ steps.dev.outputs.flavor }}'
-          " 2>&1 | tee init.log
-          echo "--- exit: ${PIPESTATUS[0]} ---"
-          echo "--- init.log ---"; cat init.log
-          echo "--- workspace after init ---"; ls -la
-          echo "--- work? ---"; ls -la work 2>/dev/null || echo "  no work dir"
+          " 2>&1 | tee "$RUNNER_TEMP/init.log"
+          echo "exit: ${PIPESTATUS[0]}"
 
       - name: pmbootstrap build
         run: |
+          set -o pipefail
           sudo -u pmuser -H bash -c "
-            cd '$GITHUB_WORKSPACE' || exit 1
-            pmbootstrap build --work-dir '$GITHUB_WORKSPACE/work'
-          " 2>&1 | tee build.log
-          echo "--- exit: ${PIPESTATUS[0]} ---"
-          echo "--- tail of build.log ---"; tail -40 build.log || true
+            cd '$BUILD_DIR' || exit 1
+            pmbootstrap build --work-dir '$BUILD_DIR/work'
+          " 2>&1 | tee "$RUNNER_TEMP/build.log"
+          echo "exit: ${PIPESTATUS[0]}"
 
-      - name: Locate build output
+      - name: Locate and copy build output
         run: |
-          set +e
-          echo "=== where did the output land? ==="
-          echo "--- workspace ---"; ls -la "$GITHUB_WORKSPACE" | head -20
-          echo "--- work dir ---"; ls -la "$GITHUB_WORKSPACE/work" 2>/dev/null | head -30 || echo "  absent"
-          echo "--- pmuser home ---"; sudo ls -la /home/pmuser 2>/dev/null | head -15
+          set -e
+          echo "=== kernel / initramfs produced ==="
+          sudo find "$BUILD_DIR/work" \
+            \( -name 'vmlinuz*' -o -name 'initramfs*' \) -type f \
+            -printf '%10s  %p\n' 2>/dev/null | tee "$RUNNER_TEMP/outputs.txt" | head -20
+
+          KERNEL=$(sudo find "$BUILD_DIR/work" -name 'vmlinuz*' -type f | head -1)
+          RAMDISK=$(sudo find "$BUILD_DIR/work" -name 'initramfs*' -type f | head -1)
+
+          if [ -z "$KERNEL" ] || [ -z "$RAMDISK" ]; then
+            echo "::error::no kernel or initramfs was produced"
+            echo "--- work dir ---"
+            sudo ls -la "$BUILD_DIR/work" 2>/dev/null | head -20 || echo "  absent"
+            echo "--- tail of build.log ---"
+            tail -30 "$RUNNER_TEMP/build.log" || true
+            exit 1
+          fi
+
+          mkdir -p artifacts
+          sudo cp "$KERNEL"  artifacts/vmlinuz
+          sudo cp "$RAMDISK" artifacts/initramfs
+          sudo chown runner:runner artifacts/*
           echo
-          echo "=== search the filesystem for the kernel ==="
-          sudo find / -xdev \( -name 'vmlinuz*' -o -name 'initramfs*' \) -type f \
-            -printf '%10s  %p\n' 2>/dev/null | head -20
-          echo "(empty means pmbootstrap produced nothing at all)"
+          ls -la artifacts
 
       - name: Package fastboot-bootable image
         run: |
           set -e
-          KERNEL=$(find work -name 'vmlinuz*' -type f | head -1)
-          RAMDISK=$(find work -name 'initramfs*' -type f | head -1)
+          KERNEL=artifacts/vmlinuz
+          RAMDISK=artifacts/initramfs
+          echo "kernel : $(stat -c%s "$KERNEL") bytes"
+          echo "ramdisk: $(stat -c%s "$RAMDISK") bytes"
 
-          if [ -z "$KERNEL" ] || [ -z "$RAMDISK" ]; then
-            echo "::error::no kernel or initramfs produced; see the Locate step above"
-            exit 1
-          fi
-          echo "kernel : $KERNEL ($(stat -c%s "$KERNEL") bytes)"
-          echo "ramdisk: $RAMDISK ($(stat -c%s "$RAMDISK") bytes)"
-
-          # Use courbet's own device tree when it is present. A mainline kernel
-          # cannot take the Android tree directly, so this only becomes useful
-          # once a mainline-format courbet tree exists; until then the port's
-          # own tree is the right default.
+          # courbet's own tree would be the right thing, but a mainline kernel
+          # cannot consume the Android tree, so only use it if a mainline-format
+          # one has been added here. Otherwise rely on the kernel's built-in tree.
           DTB_ARGS=()
           if [ -f device/courbet.dtb ]; then
             DTB_ARGS=(--dtb device/courbet.dtb)
@@ -214,6 +218,7 @@ jobs:
                    "${DTB_ARGS[@]}" -o out/boot-pmos.img
           python3 scripts/mkbootimg.py --kernel "$KERNEL" --ramdisk "$RAMDISK" \
                    "${DTB_ARGS[@]}" --pad-to-partition -o out/boot-pmos-128m.img
+          cp "$RUNNER_TEMP"/init.log "$RUNNER_TEMP"/build.log out/ 2>/dev/null || true
           echo
           ls -la out
 
