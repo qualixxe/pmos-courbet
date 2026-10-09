@@ -1,0 +1,10 @@
+# build output
+out/
+work/
+
+# python
+__pycache__/
+*.pyc
+
+# device trees are fetched by the workflow, not committed
+device/*.dtb

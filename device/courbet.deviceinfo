@@ -1,0 +1,38 @@
+device = "courbet"
+vendor = "xiaomi"
+model = "courbet"
+year = "2020"
+arch = "aarch64"
+
+# Xiaomi Mi 11 Lite 4G, Snapdragon 732G / SM7325, codename courbet.
+
+# No storage medium is reachable from the firmware: the UEFI built in this
+# project exposes only USB Mass Storage with FAT32, has no UFS driver and its
+# network stack is compiled out. The only way to run anything is to have it
+# already in RAM, which is what "fastboot boot" does - it loads the kernel and
+# initramfs over USB and starts them without touching a partition.
+flash_method = "fastboot boot"
+
+kernel_flavor = "mainline"
+
+# The board is already known to the bootloader: the stock boot image carries
+# courbet's device tree after the ramdisk, 398043 bytes, and the running
+# Android reports ro.boot.dtb_idx 11 from the dtbo partition.
+#
+# A mainline kernel needs the same tree in mainline's flatbed format. Until one
+# exists the Android tree is the only source, and mainline cannot consume it
+# directly. This is the largest gap between here and a bootable phone, and it
+# is why the image built by this workflow is expected to fail to reach a
+# console rather than merely to be missing features.
+dtb = "courbet.dtb"
+dtb_model = "Xiaomi M2004J2SC"
+
+soc_model = "Qualcomm Technologies, Inc SM7325"
+
+# Nothing is flashed, so the usual partition geometry is not consulted.
+has_root_partitions = False
+has_android_boot = True
+
+# The initramfs is the whole payload. Without a writable medium the session is
+# read-only plus tmpfs, which is enough to confirm the kernel reached userspace.
+rootfs_type = "none"
