@@ -183,19 +183,30 @@ jobs:
       - name: pmbootstrap init
         run: |
           set -o pipefail
-          sudo -u pmuser -H bash -c "
-            cd '$BUILD_DIR' || exit 1
-            yes '' | pmbootstrap --details-to-stdout -y -w '$BUILD_DIR/work' init
-          " 2>&1 | tee "$RUNNER_TEMP/init.log"
-          echo "exit: ${PIPESTATUS[0]}"
+          # HOME and XDG_CONFIG_HOME are set explicitly, and the config path is
+          # passed with -c, because pmbootstrap was otherwise resolving its
+          # config to /home/runner/.config and failing to write there.
+          #
+          # Prompts are answered with empty lines so the offered defaults are
+          # taken: cli.ask() calls input() directly, so --assume-yes alone is
+          # not enough.
+          yes '' | sudo -u pmuser -H env \
+            HOME=/home/pmuser \
+            XDG_CONFIG_HOME=/home/pmuser/.config \
+            bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
+                     -c /home/pmuser/.config/pmbootstrap.cfg \
+                     -w '$BUILD_DIR/work' init" 2>&1 | tee "$RUNNER_TEMP/init.log"
+          echo "exit: ${PIPESTATUS[1]}"
 
       - name: pmbootstrap build
         run: |
           set -o pipefail
-          sudo -u pmuser -H bash -c "
-            cd '$BUILD_DIR' || exit 1
-            pmbootstrap --details-to-stdout -y -w '$BUILD_DIR/work' build
-          " 2>&1 | tee "$RUNNER_TEMP/build.log"
+          sudo -u pmuser -H env \
+            HOME=/home/pmuser \
+            XDG_CONFIG_HOME=/home/pmuser/.config \
+            bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
+                     -c /home/pmuser/.config/pmbootstrap.cfg \
+                     -w '$BUILD_DIR/work' build" 2>&1 | tee "$RUNNER_TEMP/build.log"
           echo "exit: ${PIPESTATUS[0]}"
 
       - name: Locate and copy build output
