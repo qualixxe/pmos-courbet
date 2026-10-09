@@ -49,7 +49,20 @@ fi
 
 echo "::group::Installing pmbootstrap"
 sudo "$PIP" install --no-cache-dir --upgrade pip setuptools wheel
-sudo "$PIP" install --no-cache-dir pmbootstrap
+
+# The version must be pinned exactly.
+#
+# Every pmbootstrap release on PyPI is marked yanked - the project deprecated
+# installing from PyPI at all - so a plain `pip install pmbootstrap` resolves
+# to nothing:
+#
+#   ERROR: Ignored the following yanked versions: 1.0.1 ... 2.1.0
+#   ERROR: Could not find a version that satisfies the requirement pmbootstrap
+#
+# pip will still install a yanked release when it is pinned to that exact
+# version, warning but proceeding. That is what this line relies on.
+PMB_VERSION="${PMB_VERSION:-2.1.0}"
+sudo "$PIP" install --no-cache-dir "pmbootstrap==${PMB_VERSION}"
 echo "::endgroup::"
 
 # Put it on PATH for the later steps, which run under sudo -iu and do not
@@ -72,3 +85,12 @@ echo "::endgroup::"
 
 # Report what we actually got, so a later failure is not a mystery.
 sudo "$PIP" list 2>/dev/null | grep -i pmbootstrap || echo "  (pmbootstrap not visible in pip list)"
+
+# pmbootstrap imports fcntl, which exists only on POSIX. If it fails to import
+# here, the job is not on a usable platform and no amount of retrying will help.
+if ! "$VENV/bin/python" -c "import pmb" 2>/dev/null; then
+    echo "::error::pmbootstrap is installed but will not import on this platform"
+    "$VENV/bin/python" -c "import pmb" 2>&1 | tail -5 || true
+    exit 1
+fi
+echo "pmbootstrap imports cleanly"
