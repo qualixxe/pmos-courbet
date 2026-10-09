@@ -143,38 +143,46 @@ jobs:
 
       - name: pmbootstrap init
         run: |
-          sudo -iu pmuser bash -lc "
-            set -eu
-            cd '$GITHUB_WORKSPACE'
+          # Not `sudo -iu pmuser bash -lc`: a login shell resets PATH and the
+          # environment, and the tool was exiting 0 in complete silence, which
+          # is what hid the real failure. Capture everything instead.
+          sudo -u pmuser -H bash -c "
+            cd '$GITHUB_WORKSPACE' || exit 1
+            pwd
+            which pmbootstrap
             pmbootstrap init \
-              --work-dir work \
+              --work-dir '$GITHUB_WORKSPACE/work' \
               --apkrepo '$PMS_APK_REPO' \
               --branch '$PMS_APK_BRANCH' \
               '${{ steps.dev.outputs.device }}' \
               --kernel-flavor '${{ steps.dev.outputs.flavor }}'
-          "
+          " 2>&1 | tee init.log
+          echo "--- exit: ${PIPESTATUS[0]} ---"
+          echo "--- init.log ---"; cat init.log
+          echo "--- workspace after init ---"; ls -la
+          echo "--- work? ---"; ls -la work 2>/dev/null || echo "  no work dir"
 
       - name: pmbootstrap build
         run: |
-          sudo -iu pmuser bash -lc "
-            set -eu
-            cd '$GITHUB_WORKSPACE'
-            pmbootstrap build --work-dir work
-            echo '=== work dir after build ==='
-            ls -la work || echo 'work dir is missing'
-          "
+          sudo -u pmuser -H bash -c "
+            cd '$GITHUB_WORKSPACE' || exit 1
+            pmbootstrap build --work-dir '$GITHUB_WORKSPACE/work'
+          " 2>&1 | tee build.log
+          echo "--- exit: ${PIPESTATUS[0]} ---"
+          echo "--- tail of build.log ---"; tail -40 build.log || true
 
       - name: Locate build output
         run: |
-          set -e
-          # Report what actually exists before anything depends on it, so the
-          # next failure is never another mystery.
-          echo "=== top of work dir ==="
-          ls -la work 2>/dev/null || echo "  work dir is absent"
+          set +e
+          echo "=== where did the output land? ==="
+          echo "--- workspace ---"; ls -la "$GITHUB_WORKSPACE" | head -20
+          echo "--- work dir ---"; ls -la "$GITHUB_WORKSPACE/work" 2>/dev/null | head -30 || echo "  absent"
+          echo "--- pmuser home ---"; sudo ls -la /home/pmuser 2>/dev/null | head -15
           echo
-          echo "=== kernel / initramfs candidates ==="
-          find work -maxdepth 8 \( -name 'vmlinuz*' -o -name 'initramfs*' -o -name '*.img' \) \
-            -type f -printf '%10s  %p\n' 2>/dev/null | head -30 || true
+          echo "=== search the filesystem for the kernel ==="
+          sudo find / -xdev \( -name 'vmlinuz*' -o -name 'initramfs*' \) -type f \
+            -printf '%10s  %p\n' 2>/dev/null | head -20
+          echo "(empty means pmbootstrap produced nothing at all)"
 
       - name: Package fastboot-bootable image
         run: |
