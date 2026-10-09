@@ -144,17 +144,46 @@ jobs:
             echo "  failed boot gives no visible output and no log."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Write pmbootstrap config
+        run: |
+          set -e
+          # pmbootstrap 2.x takes no arguments on `init` at all. Everything is
+          # configured through an INI file read from $XDG_CONFIG_HOME or -c,
+          # under the [pmbootstrap] section. The 1.x-era invocation this workflow
+          # was originally written against does not exist any more.
+          #
+          # Keys verified against pmb/config/__init__.py in the installed
+          # package: aports, device, kernel, work.
+          #
+          #   pmbootstrap init  -> "initialize config file"
+          #   [-p/--aports]     path to a pmaports checkout
+          #   [-w/--work]       where chroots and built packages go
+          #   [-c/--config]     path to this file
+          #
+          # pmaports is copied into the build dir rather than referenced in the
+          # workspace, because pmuser cannot traverse /home/runner.
+          cp -a pmaports "$BUILD_DIR/pmaports"
+          sudo chown -R pmuser:pmuser "$BUILD_DIR/pmaports"
+
+          sudo mkdir -p /home/pmuser/.config
+          sudo tee /home/pmuser/.config/pmbootstrap.cfg > /dev/null <<EOF
+          [pmbootstrap]
+          aports = $BUILD_DIR/pmaports
+          device = ${{ steps.dev.outputs.device }}
+          kernel = ${{ steps.dev.outputs.flavor }}
+          work = $BUILD_DIR/work
+          EOF
+          sudo chown pmuser:pmuser /home/pmuser/.config/pmbootstrap.cfg
+          sudo chmod 600 /home/pmuser/.config/pmbootstrap.cfg
+          echo "--- config as pmuser sees it ---"
+          sudo -u pmuser -H cat /home/pmuser/.config/pmbootstrap.cfg
+
       - name: pmbootstrap init
         run: |
           set -o pipefail
           sudo -u pmuser -H bash -c "
             cd '$BUILD_DIR' || exit 1
-            pmbootstrap init \
-              --work-dir '$BUILD_DIR/work' \
-              --apkrepo '$PMS_APK_REPO' \
-              --branch '$PMS_APK_BRANCH' \
-              '${{ steps.dev.outputs.device }}' \
-              --kernel-flavor '${{ steps.dev.outputs.flavor }}'
+            pmbootstrap -w '$BUILD_DIR/work' init
           " 2>&1 | tee "$RUNNER_TEMP/init.log"
           echo "exit: ${PIPESTATUS[0]}"
 
@@ -163,7 +192,7 @@ jobs:
           set -o pipefail
           sudo -u pmuser -H bash -c "
             cd '$BUILD_DIR' || exit 1
-            pmbootstrap build --work-dir '$BUILD_DIR/work'
+            pmbootstrap -w '$BUILD_DIR/work' build
           " 2>&1 | tee "$RUNNER_TEMP/build.log"
           echo "exit: ${PIPESTATUS[0]}"
 
