@@ -100,6 +100,11 @@ jobs:
           sudo adduser --disabled-password --gecos "" pmuser
           echo "pmuser ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/pmuser
           sudo chmod 700 /home/pmuser
+          # The build runs as pmuser but the work dir lives in the workspace,
+          # which is owned by `runner`. Without this pmbootstrap cannot create
+          # it, and the packaging step then finds no output at all.
+          sudo chmod -R a+rwX "$GITHUB_WORKSPACE"
+          echo "workspace writable by: $(stat -c '%A %U' "$GITHUB_WORKSPACE")"
 
       - name: Report maturity of the target
         run: |
@@ -155,7 +160,21 @@ jobs:
             set -eu
             cd '$GITHUB_WORKSPACE'
             pmbootstrap build --work-dir work
+            echo '=== work dir after build ==='
+            ls -la work || echo 'work dir is missing'
           "
+
+      - name: Locate build output
+        run: |
+          set -e
+          # Report what actually exists before anything depends on it, so the
+          # next failure is never another mystery.
+          echo "=== top of work dir ==="
+          ls -la work 2>/dev/null || echo "  work dir is absent"
+          echo
+          echo "=== kernel / initramfs candidates ==="
+          find work -maxdepth 8 \( -name 'vmlinuz*' -o -name 'initramfs*' -o -name '*.img' \) \
+            -type f -printf '%10s  %p\n' 2>/dev/null | head -30 || true
 
       - name: Package fastboot-bootable image
         run: |
@@ -164,23 +183,29 @@ jobs:
           RAMDISK=$(find work -name 'initramfs*' -type f | head -1)
 
           if [ -z "$KERNEL" ] || [ -z "$RAMDISK" ]; then
-            echo "::error::no kernel or initramfs produced; see the earlier steps"
-            find work -maxdepth 5 -name '*.img' -o -name 'vmlinuz*' | head -20 || true
+            echo "::error::no kernel or initramfs produced; see the Locate step above"
             exit 1
           fi
-          echo "kernel : $KERNEL"
-          echo "ramdisk: $RAMDISK"
+          echo "kernel : $KERNEL ($(stat -c%s "$KERNEL") bytes)"
+          echo "ramdisk: $RAMDISK ($(stat -c%s "$RAMDISK") bytes)"
 
-          DTB=""
-          for cand in device/courbet.dtb "work/chroot_rootfs_${{ steps.dev.outputs.device }}/boot/dtbs"; do
-            [ -e "$cand" ] && DTB="" && break
-          done
-          if [ -f device/courbet.dtb ]; then DTB="--dtb device/courbet.dtb"; fi
+          # Use courbet's own device tree when it is present. A mainline kernel
+          # cannot take the Android tree directly, so this only becomes useful
+          # once a mainline-format courbet tree exists; until then the port's
+          # own tree is the right default.
+          DTB_ARGS=()
+          if [ -f device/courbet.dtb ]; then
+            DTB_ARGS=(--dtb device/courbet.dtb)
+            echo "dtb    : device/courbet.dtb"
+          else
+            echo "dtb    : none - payload relies on the kernel's built-in tree"
+          fi
 
           mkdir -p out
-          python3 scripts/mkbootimg.py --kernel "$KERNEL" --ramdisk "$RAMDISK" $DTB -o out/boot-pmos.img
-          python3 scripts/mkbootimg.py --kernel "$KERNEL" --ramdisk "$RAMDISK" $DTB \
-                   --pad-to-partition -o out/boot-pmos-128m.img
+          python3 scripts/mkbootimg.py --kernel "$KERNEL" --ramdisk "$RAMDISK" \
+                   "${DTB_ARGS[@]}" -o out/boot-pmos.img
+          python3 scripts/mkbootimg.py --kernel "$KERNEL" --ramdisk "$RAMDISK" \
+                   "${DTB_ARGS[@]}" --pad-to-partition -o out/boot-pmos-128m.img
           echo
           ls -la out
 
