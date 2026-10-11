@@ -96,6 +96,18 @@ jobs:
             -b "${{ github.event.inputs.pmaports_branch }}" \
             "$PMAPORTS_REPO" "$BUILD_DIR/pmaports"
           cd "$BUILD_DIR/pmaports"
+
+          # ask_for_channel() reads channels.cfg with
+          #   git show <official-remote>/master:channels.cfg
+          # which cannot work here: this fork's origin points at the fork, and
+          # the official pmaports has no master branch at all. The file is
+          # passed explicitly with --config-channels instead, which skips that
+          # lookup entirely.
+          git fetch -q --depth 1 origin master
+          git show FETCH_HEAD:channels.cfg > "$BUILD_DIR/channels.cfg"
+          echo "--- channels.cfg ---"
+          head -5 "$BUILD_DIR/channels.cfg"
+
           echo "branch : $(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD)"
           echo "--- port and kernel aport ---"
           ls -d device/*/device-xiaomi-courbet
@@ -136,7 +148,8 @@ jobs:
             XDG_CONFIG_HOME=/home/pmuser/.config \
             bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
                      -c /home/pmuser/.config/pmbootstrap.cfg \
-                     -w '$BUILD_DIR/work' init" 2>&1 | tee out/init.log
+                     -w '$BUILD_DIR/work' \
+                     --config-channels '$BUILD_DIR/channels.cfg' init" 2>&1 | tee out/init.log
           rc=${PIPESTATUS[1]}
           echo "init exit: $rc"
           echo "--- config as it ended up ---"
