@@ -1,18 +1,30 @@
 name: Build pmOS for courbet (courbet_stable fork)
 
-# The working pmOS path for courbet is documented on the pmOS wiki as an
-# out-of-tree fork: kevinwidjaja21/pmaports, branch courbet_stable, release
-# channel v24.12. The device is not in the pmbootstrap repositories yet, so it
-# cannot be selected through pmbootstrap init normally.
+# The working pmOS path for courbet is an out-of-tree fork documented on the
+# pmOS wiki: kevinwidjaja21/pmaports, branch courbet_stable, channel v24.12.
 #
-# gitlab.postmarketos.org sits behind Anubis, an anti-bot gate that needs
-# JavaScript. A CI runner gets the challenge page instead of a tarball, so the
-# clone cannot happen here. The branch tarball is therefore downloaded in a real
-# browser and published as an asset on a release in this repository; this
-# workflow takes that asset URL as an input and verifies it really is a gzip
-# stream before using it.
+# Three obstacles, each confirmed by reading the code rather than by guessing:
 #
-# Browser URL that works:
+#  1. gitlab.postmarketos.org is behind Anubis, a JavaScript anti-bot gate, so a
+#     runner cannot clone pmaports from it. The branch tarball is downloaded
+#     from a release asset instead, and checked for the gzip magic so an Anubis
+#     page fails loudly instead of silently.
+#
+#  2. pmbootstrap lives on SourceHut and its latest PyPI release is still 2.1.0,
+#     while the fork's pmaports.cfg declares pmbootstrap_min_version=2.3.2.
+#     read_config() raises on that mismatch, so init dies before it starts.
+#     It must be installed from git.sr.ht/~postmarketos/pmbootstrap master.
+#
+#  3. `pmbootstrap init` runs `git rev-parse` on the aports directory
+#     unconditionally, so a plain unpacked tarball is not enough - it has to be
+#     a git repository. It is made one here, on a branch that is not "master"
+#     so the githooks copy step is skipped.
+#
+# The channel needs no branch switch: the fork's pmaports.cfg already says
+# channel=v24.12, and is_default_channel=False keeps the prompt on that value,
+# so switch_to_channel_branch() returns before touching git.
+#
+# Browser URL for the tarball:
 #   https://gitlab.postmarketos.org/kevinwidjaja21/pmaports/-/archive/courbet_stable/pmaports-courbet_stable.tar.gz
 
 on:
@@ -21,25 +33,22 @@ on:
       pmaports_tarball:
         description: 'Asset URL of the courbet_stable pmaports tarball'
         required: true
-      channel:
-        description: 'pmOS release channel (wiki: v24.12)'
-        required: false
-        default: 'v24.12'
-      kernel_pkg:
-        description: 'kernel package to build'
-        required: false
-        default: 'linux-postmarketos-qcom-sm7150'
       device:
         description: 'pmOS device codename'
         required: false
         default: 'xiaomi-courbet'
+      kernel_pkg:
+        description: 'kernel package to build'
+        required: false
+        default: 'linux-postmarketos-qcom-sm7150'
       cmdline:
-        description: 'kernel cmdline (deviceinfo says console=null, so blank by default)'
+        description: 'kernel cmdline (deviceinfo says console=null, so blank)'
         required: false
         default: ''
 
 env:
   BUILD_DIR: /home/pmuser/pmbuild
+  PMB_REPO: https://git.sr.ht/~postmarketos/pmbootstrap
 
 jobs:
   build:
@@ -58,16 +67,23 @@ jobs:
             gcc-aarch64-linux-gnu
           mkdir -p out
 
-      - name: Install pmbootstrap
+      - name: Install pmbootstrap from SourceHut
         run: |
           set -e
-          sudo python3 -m venv /opt/pmbootstrap
-          if ! sudo /opt/pmbootstrap/bin/pip install --no-cache-dir pmbootstrap; then
-            echo "latest pmbootstrap refused, falling back to pinned 2.1.0"
-            sudo /opt/pmbootstrap/bin/pip install --no-cache-dir "pmbootstrap==2.1.0"
-          fi
-          sudo ln -sf /opt/pmbootstrap/bin/pmbootstrap /usr/local/bin/pmbootstrap
-          /opt/pmbootstrap/bin/python -c "import pmb; print('pmb imports OK')"
+          sudo apt-get install -y --no-install-recommends python3-venv
+          sudo python3 -m venv /opt/pmb
+          git clone --depth 1 "$PMB_REPO" /opt/pmb-src
+          sudo /opt/pmb/bin/pip install --no-cache-dir /opt/pmb-src
+          sudo ln -sf /opt/pmb/bin/pmbootstrap /usr/local/bin/pmbootstrap
+          # The fork refuses to initialise against anything older than 2.3.2,
+          # and PyPI has never gone past 2.1.0, so print the version and fail
+          # here rather than inside pmbootstrap with a vaguer message.
+          /opt/pmb/bin/python - <<'PY'
+          import pmb
+          v = tuple(int(x) for x in pmb.__version__.split(".")[:3])
+          print("pmbootstrap", pmb.__version__)
+          assert v >= (2, 3, 2), "fork needs >= 2.3.2, got %s" % (pmb.__version__,)
+          PY
 
       - name: Create build user
         run: |
@@ -76,13 +92,11 @@ jobs:
           echo "pmuser ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/pmuser
           sudo install -d -o pmuser -g pmuser -m 0755 "$BUILD_DIR"
 
-      - name: Fetch pmaports tarball
+      - name: Fetch pmaports tarball and make it a git checkout
         env:
           ASSET_URL: ${{ github.event.inputs.pmaports_tarball }}
         run: |
           set -e
-          # The release asset lives in this repository, which may be private,
-          # and a release asset URL needs the token to be readable in that case.
           curl -Lf -H "Authorization: Bearer $GITHUB_TOKEN" \
                -o /tmp/pmaports.tar.gz "$ASSET_URL"
           if [ "$(od -An -tx1 -N2 /tmp/pmaports.tar.gz | tr -d ' ')" != "1f8b" ]; then
@@ -93,16 +107,22 @@ jobs:
           fi
           sudo -u pmuser -H tar -xzf /tmp/pmaports.tar.gz -C "$BUILD_DIR"
           sudo -u pmuser -H bash -c "mv '$BUILD_DIR'/pmaports-* '$BUILD_DIR/pmaports'"
+          # pmbootstrap init runs git rev-parse on this directory without
+          # checking whether it is a repository first.
+          sudo -u pmuser -H bash -c "
+            cd '$BUILD_DIR/pmaports' &&
+            git init -q -b courbet_stable &&
+            git -c user.email=ci@localhost -c user.name=ci add -A &&
+            git -c user.email=ci@localhost -c user.name=ci commit -q -m fork &&
+            git rev-parse --abbrev-ref HEAD"
 
-          # The port lives in device/testing, not device/community. Searching
-          # only community finds nothing and the build then dies with a device
-          # that pmbootstrap says does not exist.
-          echo "--- courbet port ---"
+          echo "--- port and kernel aport ---"
           ls -d "$BUILD_DIR"/pmaports/device/*/device-xiaomi-courbet
-          echo "--- kernel aport ---"
           ls -d "$BUILD_DIR"/pmaports/device/*/linux-postmarketos-qcom-sm7150
+          echo "--- pmaports.cfg ---"
+          cat "$BUILD_DIR/pmaports/pmaports.cfg"
           echo "--- deviceinfo ---"
-          grep -E 'deviceinfo_(dtb|flash_method|kernel_cmdline|header_version|flash_offset|flash_pagesize|rootfs_image_sector_size|append_dtb)' \
+          grep -E 'deviceinfo_(dtb|append_dtb|flash_method|kernel_cmdline|header_version|flash_offset|flash_pagesize)' \
             "$BUILD_DIR"/pmaports/device/*/device-xiaomi-courbet/deviceinfo
 
       - name: Write pmbootstrap config
@@ -113,8 +133,16 @@ jobs:
           [pmbootstrap]
           aports = $BUILD_DIR/pmaports
           device = ${{ github.event.inputs.device }}
-          kernel = mainline
+          kernel = qcom-sm7150
           work = $BUILD_DIR/work
+          is_default_channel = False
+          user = pm
+          ui = none
+          extra_packages = none
+          locale = en_US.UTF-8
+          timezone = GMT
+          hostname = courbet
+          ccache_size = 0
           EOF
           sudo chown pmuser:pmuser /home/pmuser/.config/pmbootstrap.cfg
           sudo chmod 600 /home/pmuser/.config/pmbootstrap.cfg
@@ -128,25 +156,13 @@ jobs:
             bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
                      -c /home/pmuser/.config/pmbootstrap.cfg \
                      -w '$BUILD_DIR/work' init" 2>&1 | tee out/init.log
-          test "${PIPESTATUS[1]}" -eq 0
-
-      - name: Set release channel
-        run: |
-          set -o pipefail
-          sudo -u pmuser -H env \
-            HOME=/home/pmuser \
+          rc=${PIPESTATUS[1]}
+          echo "init exit: $rc"
+          echo "--- config as it ended up ---"
+          sudo -u pmuser -H env HOME=/home/pmuser \
             XDG_CONFIG_HOME=/home/pmuser/.config \
-            bash -c "cd '$BUILD_DIR' && pmbootstrap \
-                     -c /home/pmuser/.config/pmbootstrap.cfg \
-                     -w '$BUILD_DIR/work' config channel '${{ github.event.inputs.channel }}'" \
-            2>&1 | tee out/channel.log
-          echo "--- effective config ---"
-          sudo -u pmuser -H env \
-            HOME=/home/pmuser \
-            XDG_CONFIG_HOME=/home/pmuser/.config \
-            bash -c "cd '$BUILD_DIR' && pmbootstrap \
-                     -c /home/pmuser/.config/pmbootstrap.cfg \
-                     -w '$BUILD_DIR/work' config" 2>&1 | tee -a out/channel.log
+            cat /home/pmuser/.config/pmbootstrap.cfg || true
+          test "$rc" -eq 0
 
       - name: Build kernel package
         run: |
@@ -202,17 +218,16 @@ jobs:
           n = lambda s: (s + page - 1) // page
           h = bytearray(page)
           h[0:8] = b"ANDROID!"
-          # Offsets copied from device-xiaomi-courbet/deviceinfo: base 0,
-          # kernel 0x8000, ramdisk 0x1000000, tags 0x100, page 4096.
+          # From device-xiaomi-courbet/deviceinfo: base 0, kernel 0x8000,
+          # ramdisk 0x1000000, tags 0x100, page 4096.
           struct.pack_into("<10I", h, 8,
                            len(k), 0x8000, len(r), 0x1000000, 0, 0, 0x100, page, 0, 0)
           cmd = "${{ github.event.inputs.cmdline }}".encode()
           assert len(cmd) < 512
           h[64:64 + len(cmd)] = cmd
-          # deviceinfo_append_dtb="true": the tree goes after the ramdisk,
-          # with its length recorded at offset 1648.
           img = bytearray(bytes(h) + k + b"\0" * (n(len(k)) * page - len(k)))
           img += r + b"\0" * (n(len(r)) * page - len(r)) + t
+          # deviceinfo_append_dtb="true": tree length goes at offset 1648.
           struct.pack_into("<I", img, 1648, len(t))
           open("out/boot-pmos-courbet.img", "wb").write(img)
           print("kernel %d  ramdisk %d  dtb %d  image %d" % (len(k), len(r), len(t), len(img)))
