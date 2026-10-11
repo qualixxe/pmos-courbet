@@ -3,36 +3,35 @@ name: Build pmOS for courbet (courbet_stable fork)
 # The working pmOS path for courbet is an out-of-tree fork documented on the
 # pmOS wiki: kevinwidjaja21/pmaports, branch courbet_stable, channel v24.12.
 #
-# Three obstacles, each confirmed by reading the code rather than by guessing:
+# An earlier version of this workflow fetched pmaports as a tarball because
+# gitlab.postmarketos.org was thought to be unreachable. That was wrong. Anubis
+# gates the web pages; the git endpoints answer normally, so both repositories
+# are cloned directly and the tarball, the release asset and the "make the
+# tarball into a git repository" workaround are all gone.
 #
-#  1. gitlab.postmarketos.org is behind Anubis, a JavaScript anti-bot gate, so a
-#     runner cannot clone pmaports from it. The branch tarball is downloaded
-#     from a release asset instead, and checked for the gzip magic so an Anubis
-#     page fails loudly instead of silently.
+# Two details that are not obvious:
 #
-#  2. pmbootstrap lives on SourceHut and its latest PyPI release is still 2.1.0,
-#     while the fork's pmaports.cfg declares pmbootstrap_min_version=2.3.2.
-#     read_config() raises on that mismatch, so init dies before it starts.
-#     It must be installed from git.sr.ht/~postmarketos/pmbootstrap master.
-#
-#  3. `pmbootstrap init` runs `git rev-parse` on the aports directory
-#     unconditionally, so a plain unpacked tarball is not enough - it has to be
-#     a git repository. It is made one here, on a branch that is not "master"
-#     so the githooks copy step is skipped.
-#
-# The channel needs no branch switch: the fork's pmaports.cfg already says
-# channel=v24.12, and is_default_channel=False keeps the prompt on that value,
-# so switch_to_channel_branch() returns before touching git.
-#
-# Browser URL for the tarball:
-#   https://gitlab.postmarketos.org/kevinwidjaja21/pmaports/-/archive/courbet_stable/pmaports-courbet_stable.tar.gz
+#  - pmbootstrap's newest release on PyPI is 2.1.0, and this fork's
+#    pmaports.cfg sets pmbootstrap_min_version=2.3.2. read_config() refuses to
+#    continue below that, so pmbootstrap is installed from git rather than pip.
+#    Branch 2.3.x carries 2.3.3; the newer 3.x branches are not used here
+#    because the fork was written against the 2.3 line.
+#  - the device's deviceinfo has no deviceinfo_kernel_flavor, so the default
+#    would be "mainline" and pmbootstrap would look for a kernel package that
+#    does not exist. The fork ships linux-postmarketos-qcom-sm7150, so the
+#    kernel is set to qcom-sm7150 to match.
 
 on:
   workflow_dispatch:
     inputs:
-      pmaports_tarball:
-        description: 'Asset URL of the courbet_stable pmaports tarball'
-        required: true
+      pmaports_branch:
+        description: 'Branch of the courbet fork'
+        required: false
+        default: 'courbet_stable'
+      pmbootstrap_branch:
+        description: 'pmbootstrap branch (2.3.x carries 2.3.3)'
+        required: false
+        default: '2.3.x'
       device:
         description: 'pmOS device codename'
         required: false
@@ -48,7 +47,8 @@ on:
 
 env:
   BUILD_DIR: /home/pmuser/pmbuild
-  PMB_REPO: https://git.sr.ht/~postmarketos/pmbootstrap
+  PMAPORTS_REPO: https://gitlab.postmarketos.org/kevinwidjaja21/pmaports
+  PMB_REPO: https://gitlab.postmarketos.org/postmarketOS/pmbootstrap
 
 jobs:
   build:
@@ -67,22 +67,19 @@ jobs:
             gcc-aarch64-linux-gnu
           mkdir -p out
 
-      - name: Install pmbootstrap from SourceHut
+      - name: Install pmbootstrap from git
         run: |
           set -e
-          sudo apt-get install -y --no-install-recommends python3-venv
           sudo python3 -m venv /opt/pmb
-          git clone --depth 1 "$PMB_REPO" /opt/pmb-src
+          git clone --depth 1 -b "${{ github.event.inputs.pmbootstrap_branch }}" \
+                    "$PMB_REPO" /opt/pmb-src
           sudo /opt/pmb/bin/pip install --no-cache-dir /opt/pmb-src
           sudo ln -sf /opt/pmb/bin/pmbootstrap /usr/local/bin/pmbootstrap
-          # The fork refuses to initialise against anything older than 2.3.2,
-          # and PyPI has never gone past 2.1.0, so print the version and fail
-          # here rather than inside pmbootstrap with a vaguer message.
           /opt/pmb/bin/python - <<'PY'
           import pmb
           v = tuple(int(x) for x in pmb.__version__.split(".")[:3])
           print("pmbootstrap", pmb.__version__)
-          assert v >= (2, 3, 2), "fork needs >= 2.3.2, got %s" % (pmb.__version__,)
+          assert v >= (2, 3, 2), "fork requires >= 2.3.2, got %s" % pmb.__version__
           PY
 
       - name: Create build user
@@ -92,38 +89,22 @@ jobs:
           echo "pmuser ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/pmuser
           sudo install -d -o pmuser -g pmuser -m 0755 "$BUILD_DIR"
 
-      - name: Fetch pmaports tarball and make it a git checkout
-        env:
-          ASSET_URL: ${{ github.event.inputs.pmaports_tarball }}
+      - name: Clone the courbet fork of pmaports
         run: |
           set -e
-          curl -Lf -H "Authorization: Bearer $GITHUB_TOKEN" \
-               -o /tmp/pmaports.tar.gz "$ASSET_URL"
-          if [ "$(od -An -tx1 -N2 /tmp/pmaports.tar.gz | tr -d ' ')" != "1f8b" ]; then
-            echo "::error::that URL did not return a gzip tarball."
-            echo "Most likely the Anubis challenge page came back instead."
-            head -c 300 /tmp/pmaports.tar.gz || true
-            exit 1
-          fi
-          sudo -u pmuser -H tar -xzf /tmp/pmaports.tar.gz -C "$BUILD_DIR"
-          sudo -u pmuser -H bash -c "mv '$BUILD_DIR'/pmaports-* '$BUILD_DIR/pmaports'"
-          # pmbootstrap init runs git rev-parse on this directory without
-          # checking whether it is a repository first.
-          sudo -u pmuser -H bash -c "
-            cd '$BUILD_DIR/pmaports' &&
-            git init -q -b courbet_stable &&
-            git -c user.email=ci@localhost -c user.name=ci add -A &&
-            git -c user.email=ci@localhost -c user.name=ci commit -q -m fork &&
-            git rev-parse --abbrev-ref HEAD"
-
+          sudo -u pmuser -H git clone --depth 1 \
+            -b "${{ github.event.inputs.pmaports_branch }}" \
+            "$PMAPORTS_REPO" "$BUILD_DIR/pmaports"
+          cd "$BUILD_DIR/pmaports"
+          echo "branch : $(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD)"
           echo "--- port and kernel aport ---"
-          ls -d "$BUILD_DIR"/pmaports/device/*/device-xiaomi-courbet
-          ls -d "$BUILD_DIR"/pmaports/device/*/linux-postmarketos-qcom-sm7150
+          ls -d device/*/device-xiaomi-courbet
+          ls -d device/*/linux-postmarketos-qcom-sm7150
           echo "--- pmaports.cfg ---"
-          cat "$BUILD_DIR/pmaports/pmaports.cfg"
+          grep -E 'version|channel' pmaports.cfg
           echo "--- deviceinfo ---"
           grep -E 'deviceinfo_(dtb|append_dtb|flash_method|kernel_cmdline|header_version|flash_offset|flash_pagesize)' \
-            "$BUILD_DIR"/pmaports/device/*/device-xiaomi-courbet/deviceinfo
+            device/*/device-xiaomi-courbet/deviceinfo
 
       - name: Write pmbootstrap config
         run: |
@@ -159,8 +140,7 @@ jobs:
           rc=${PIPESTATUS[1]}
           echo "init exit: $rc"
           echo "--- config as it ended up ---"
-          sudo -u pmuser -H env HOME=/home/pmuser \
-            XDG_CONFIG_HOME=/home/pmuser/.config \
+          sudo -u pmuser -H env HOME=/home/pmuser XDG_CONFIG_HOME=/home/pmuser/.config \
             cat /home/pmuser/.config/pmbootstrap.cfg || true
           test "$rc" -eq 0
 
