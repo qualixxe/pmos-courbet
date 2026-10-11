@@ -152,7 +152,12 @@ jobs:
 
       - name: pmbootstrap init
         run: |
-          set -o pipefail
+          # `yes` dies with SIGPIPE once pmbootstrap stops reading stdin, which
+          # it does as soon as init finishes. Under the runner's `set -e` that
+          # aborted the step even though pmbootstrap had written the config and
+          # printed DONE. So: no errexit around the pipeline, and read the real
+          # exit status of pmbootstrap itself from PIPESTATUS.
+          set +e
           yes '' | sudo -u pmuser -H env \
             HOME=/home/pmuser \
             XDG_CONFIG_HOME=/home/pmuser/.config \
@@ -161,7 +166,8 @@ jobs:
                      -w '$BUILD_DIR/work' \
                      --config-channels /tmp/channels.cfg init" 2>&1 | tee out/init.log
           rc=${PIPESTATUS[1]}
-          echo "init exit: $rc"
+          set -e
+          echo "pmbootstrap init exit: $rc"
           echo "--- config as it ended up ---"
           sudo -u pmuser -H env HOME=/home/pmuser XDG_CONFIG_HOME=/home/pmuser/.config \
             cat /home/pmuser/.config/pmbootstrap.cfg || true
@@ -169,7 +175,7 @@ jobs:
 
       - name: Build kernel package
         run: |
-          set -o pipefail
+          set +e
           sudo -u pmuser -H env \
             HOME=/home/pmuser \
             XDG_CONFIG_HOME=/home/pmuser/.config \
@@ -177,18 +183,23 @@ jobs:
                      -c /home/pmuser/.config/pmbootstrap.cfg \
                      -w '$BUILD_DIR/work' build '${{ github.event.inputs.kernel_pkg }}' --force" \
             2>&1 | tee out/kernel.log
-          test "${PIPESTATUS[1]}" -eq 0
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "pmbootstrap build exit: $rc"
+          test "$rc" -eq 0
 
       - name: Install into chroot
         run: |
-          set -o pipefail
+          set +e
           yes '' | sudo -u pmuser -H env \
             HOME=/home/pmuser \
             XDG_CONFIG_HOME=/home/pmuser/.config \
             bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
                      -c /home/pmuser/.config/pmbootstrap.cfg \
                      -w '$BUILD_DIR/work' install --no-fde" 2>&1 | tee out/install.log
-          test "${PIPESTATUS[1]}" -eq 0
+          rc=${PIPESTATUS[1]}
+          set -e
+          echo "pmbootstrap install exit: $rc"
 
       - name: Collect kernel, initramfs, dtb
         run: |
