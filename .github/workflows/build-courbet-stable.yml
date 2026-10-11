@@ -95,7 +95,6 @@ jobs:
           sudo -u pmuser -H git clone --depth 1 \
             -b "${{ github.event.inputs.pmaports_branch }}" \
             "$PMAPORTS_REPO" "$BUILD_DIR/pmaports"
-          cd "$BUILD_DIR/pmaports"
 
           # ask_for_channel() reads channels.cfg with
           #   git show <official-remote>/master:channels.cfg
@@ -103,20 +102,31 @@ jobs:
           # the official pmaports has no master branch at all. The file is
           # passed explicitly with --config-channels instead, which skips that
           # lookup entirely.
-          git fetch -q --depth 1 origin master
-          git show FETCH_HEAD:channels.cfg > "$BUILD_DIR/channels.cfg"
+          #
+          # It goes to /tmp, not BUILD_DIR: this step runs as runner, and the
+          # build directory belongs to pmuser.
+          sudo -u pmuser -H env HOME=/home/pmuser bash -c "
+            set -e
+            cd '$BUILD_DIR/pmaports'
+            git fetch -q --depth 1 origin master
+            git show FETCH_HEAD:channels.cfg > /tmp/channels.cfg
+          "
+          chmod 644 /tmp/channels.cfg
           echo "--- channels.cfg ---"
-          head -5 "$BUILD_DIR/channels.cfg"
+          head -5 /tmp/channels.cfg
 
-          echo "branch : $(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD)"
-          echo "--- port and kernel aport ---"
-          ls -d device/*/device-xiaomi-courbet
-          ls -d device/*/linux-postmarketos-qcom-sm7150
-          echo "--- pmaports.cfg ---"
-          grep -E 'version|channel' pmaports.cfg
-          echo "--- deviceinfo ---"
-          grep -E 'deviceinfo_(dtb|append_dtb|flash_method|kernel_cmdline|header_version|flash_offset|flash_pagesize)' \
-            device/*/device-xiaomi-courbet/deviceinfo
+          sudo -u pmuser -H env HOME=/home/pmuser bash -c "
+            cd '$BUILD_DIR/pmaports'
+            echo \"branch : \$(git rev-parse --abbrev-ref HEAD) \$(git rev-parse --short HEAD)\"
+            echo '--- port and kernel aport ---'
+            ls -d device/*/device-xiaomi-courbet
+            ls -d device/*/linux-postmarketos-qcom-sm7150
+            echo '--- pmaports.cfg ---'
+            grep -E 'version|channel' pmaports.cfg
+            echo '--- deviceinfo ---'
+            grep -E 'deviceinfo_(dtb|append_dtb|flash_method|kernel_cmdline|header_version|flash_offset|flash_pagesize)' \
+              device/*/device-xiaomi-courbet/deviceinfo
+          "
 
       - name: Write pmbootstrap config
         run: |
@@ -149,7 +159,7 @@ jobs:
             bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
                      -c /home/pmuser/.config/pmbootstrap.cfg \
                      -w '$BUILD_DIR/work' \
-                     --config-channels '$BUILD_DIR/channels.cfg' init" 2>&1 | tee out/init.log
+                     --config-channels /tmp/channels.cfg init" 2>&1 | tee out/init.log
           rc=${PIPESTATUS[1]}
           echo "init exit: $rc"
           echo "--- config as it ended up ---"
