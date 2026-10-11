@@ -34,9 +34,9 @@ on:
         required: false
         default: 'xiaomi-courbet'
       cmdline:
-        description: 'kernel cmdline baked into the test image'
+        description: 'kernel cmdline (deviceinfo says console=null, so blank by default)'
         required: false
-        default: 'console=tty0'
+        default: ''
 
 env:
   BUILD_DIR: /home/pmuser/pmbuild
@@ -77,9 +77,14 @@ jobs:
           sudo install -d -o pmuser -g pmuser -m 0755 "$BUILD_DIR"
 
       - name: Fetch pmaports tarball
+        env:
+          ASSET_URL: ${{ github.event.inputs.pmaports_tarball }}
         run: |
           set -e
-          curl -Lf -o /tmp/pmaports.tar.gz "${{ github.event.inputs.pmaports_tarball }}"
+          # The release asset lives in this repository, which may be private,
+          # and a release asset URL needs the token to be readable in that case.
+          curl -Lf -H "Authorization: Bearer $GITHUB_TOKEN" \
+               -o /tmp/pmaports.tar.gz "$ASSET_URL"
           if [ "$(od -An -tx1 -N2 /tmp/pmaports.tar.gz | tr -d ' ')" != "1f8b" ]; then
             echo "::error::that URL did not return a gzip tarball."
             echo "Most likely the Anubis challenge page came back instead."
@@ -88,10 +93,17 @@ jobs:
           fi
           sudo -u pmuser -H tar -xzf /tmp/pmaports.tar.gz -C "$BUILD_DIR"
           sudo -u pmuser -H bash -c "mv '$BUILD_DIR'/pmaports-* '$BUILD_DIR/pmaports'"
-          echo "--- courbet device port ---"
-          ls "$BUILD_DIR/pmaports/device/community" | grep -i courbet
+
+          # The port lives in device/testing, not device/community. Searching
+          # only community finds nothing and the build then dies with a device
+          # that pmbootstrap says does not exist.
+          echo "--- courbet port ---"
+          ls -d "$BUILD_DIR"/pmaports/device/*/device-xiaomi-courbet
           echo "--- kernel aport ---"
-          ls -d "$BUILD_DIR/pmaports/device/community/${{ github.event.inputs.kernel_pkg }}"
+          ls -d "$BUILD_DIR"/pmaports/device/*/linux-postmarketos-qcom-sm7150
+          echo "--- deviceinfo ---"
+          grep -E 'deviceinfo_(dtb|flash_method|kernel_cmdline|header_version|flash_offset|flash_pagesize|rootfs_image_sector_size|append_dtb)' \
+            "$BUILD_DIR"/pmaports/device/*/device-xiaomi-courbet/deviceinfo
 
       - name: Write pmbootstrap config
         run: |
@@ -190,13 +202,18 @@ jobs:
           n = lambda s: (s + page - 1) // page
           h = bytearray(page)
           h[0:8] = b"ANDROID!"
+          # Offsets copied from device-xiaomi-courbet/deviceinfo: base 0,
+          # kernel 0x8000, ramdisk 0x1000000, tags 0x100, page 4096.
           struct.pack_into("<10I", h, 8,
                            len(k), 0x8000, len(r), 0x1000000, 0, 0, 0x100, page, 0, 0)
           cmd = "${{ github.event.inputs.cmdline }}".encode()
           assert len(cmd) < 512
           h[64:64 + len(cmd)] = cmd
-          img = bytes(h) + k + b"\0" * (n(len(k)) * page - len(k))
+          # deviceinfo_append_dtb="true": the tree goes after the ramdisk,
+          # with its length recorded at offset 1648.
+          img = bytearray(bytes(h) + k + b"\0" * (n(len(k)) * page - len(k)))
           img += r + b"\0" * (n(len(r)) * page - len(r)) + t
+          struct.pack_into("<I", img, 1648, len(t))
           open("out/boot-pmos-courbet.img", "wb").write(img)
           print("kernel %d  ramdisk %d  dtb %d  image %d" % (len(k), len(r), len(t), len(img)))
           PY
