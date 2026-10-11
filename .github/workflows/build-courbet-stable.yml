@@ -110,8 +110,8 @@ jobs:
             cd '$BUILD_DIR/pmaports'
             git fetch -q --depth 1 origin master
             git show FETCH_HEAD:channels.cfg > /tmp/channels.cfg
+            chmod 644 /tmp/channels.cfg
           "
-          chmod 644 /tmp/channels.cfg
           echo "--- channels.cfg ---"
           head -5 /tmp/channels.cfg
 
