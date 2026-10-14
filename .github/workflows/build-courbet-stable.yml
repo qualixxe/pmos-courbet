@@ -181,7 +181,9 @@ jobs:
             XDG_CONFIG_HOME=/home/pmuser/.config \
             bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
                      -c /home/pmuser/.config/pmbootstrap.cfg \
-                     -w '$BUILD_DIR/work' build '${{ github.event.inputs.kernel_pkg }}' --force" \
+                     -w '$BUILD_DIR/work' \
+                     --config-channels /tmp/channels.cfg \
+                     build '${{ github.event.inputs.kernel_pkg }}' --force" \
             2>&1 | tee out/kernel.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -196,7 +198,9 @@ jobs:
             XDG_CONFIG_HOME=/home/pmuser/.config \
             bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
                      -c /home/pmuser/.config/pmbootstrap.cfg \
-                     -w '$BUILD_DIR/work' install --no-fde" 2>&1 | tee out/install.log
+                     -w '$BUILD_DIR/work' \
+                     --config-channels /tmp/channels.cfg \
+                     install --no-fde" 2>&1 | tee out/install.log
           rc=${PIPESTATUS[1]}
           set -e
           echo "pmbootstrap install exit: $rc"
