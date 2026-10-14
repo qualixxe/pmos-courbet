@@ -9,7 +9,7 @@ name: Build pmOS for courbet (courbet_stable fork)
 # are cloned directly and the tarball, the release asset and the "make the
 # tarball into a git repository" workaround are all gone.
 #
-# Two details that are not obvious:
+# Details that are not obvious:
 #
 #  - pmbootstrap's newest release on PyPI is 2.1.0, and this fork's
 #    pmaports.cfg sets pmbootstrap_min_version=2.3.2. read_config() refuses to
@@ -17,7 +17,8 @@ name: Build pmOS for courbet (courbet_stable fork)
 #    Branch 2.3.x looks like the obvious choice and is wrong: its
 #    apk_tools_min_version table stops at v3.20, and this fork's channel v24.12
 #    is Alpine 3.21, so build dies with KeyError: 'v3.21'. 3.4.x is the first
-#    branch that has the entry.
+#    branch that has the entry. 3.4.x also needs the tomli backport on the
+#    runner's Python 3.10, which pip does not pull in by itself.
 #  - the device's deviceinfo has no deviceinfo_kernel_flavor, so the default
 #    would be "mainline" and pmbootstrap would look for a kernel package that
 #    does not exist. The fork ships linux-postmarketos-qcom-sm7150, so the
@@ -28,6 +29,10 @@ name: Build pmOS for courbet (courbet_stable fork)
 #    the lookup is made to resolve: the official URL is registered as the push
 #    URL (fetch keeps using the fork) and the fork's master is fetched into
 #    refs/remotes/origin/master. Nothing checked out changes.
+#  - everything runs as root with --as-root. The earlier two-user layout
+#    (runner drives, pmuser builds) died the moment a chroot directory created
+#    by root met a marker file written by pmuser: Errno 13 on
+#    chroot_native/tmp/pmb_chroot_abuild_init_done. One user, no split.
 
 on:
   workflow_dispatch:
@@ -54,9 +59,10 @@ on:
         default: ''
 
 env:
-  BUILD_DIR: /home/pmuser/pmbuild
+  BUILD_DIR: /root/pmbuild
   PMAPORTS_REPO: https://gitlab.postmarketos.org/kevinwidjaja21/pmaports
   PMB_REPO: https://gitlab.postmarketos.org/postmarketOS/pmbootstrap
+  PMB_CFG: /root/.config/pmbootstrap.cfg
 
 jobs:
   build:
@@ -72,6 +78,7 @@ jobs:
             python3 python3-venv python3-pip \
             build-essential bc bison flex gawk libssl-dev libncurses-dev \
             util-linux squashfs-tools lz4 zstd xz-utils \
+            qemu-user-static \
             gcc-aarch64-linux-gnu
           mkdir -p out
 
@@ -94,17 +101,11 @@ jobs:
           assert v >= (2, 3, 2), "fork requires >= 2.3.2, got %s" % pmb.__version__
           PY
 
-      - name: Create build user
-        run: |
-          set -e
-          sudo adduser --disabled-password --gecos "" pmuser
-          echo "pmuser ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/pmuser
-          sudo install -d -o pmuser -g pmuser -m 0755 "$BUILD_DIR"
-
       - name: Clone the courbet fork of pmaports
         run: |
           set -e
-          sudo -u pmuser -H git clone --depth 1 \
+          sudo mkdir -p "$BUILD_DIR"
+          sudo -H git clone --depth 1 \
             -b "${{ github.event.inputs.pmaports_branch }}" \
             "$PMAPORTS_REPO" "$BUILD_DIR/pmaports"
 
@@ -117,17 +118,13 @@ jobs:
           # the official URL is registered as the push URL (fetch keeps using
           # the fork), and the fork's master branch is fetched into the
           # refs/remotes/origin/master ref the command reads.
-          sudo -u pmuser -H env HOME=/home/pmuser bash -c "
+          sudo -H bash -c "
             set -e
             cd '$BUILD_DIR/pmaports'
             git remote set-url --push origin https://gitlab.postmarketos.org/postmarketOS/pmaports.git
             git fetch -q --depth 1 origin master
             git update-ref refs/remotes/origin/master FETCH_HEAD
             git show origin/master:channels.cfg | head -5
-          "
-
-          sudo -u pmuser -H env HOME=/home/pmuser bash -c "
-            cd '$BUILD_DIR/pmaports'
             echo \"branch : \$(git rev-parse --abbrev-ref HEAD) \$(git rev-parse --short HEAD)\"
             echo '--- port and kernel aport ---'
             ls -d device/*/device-xiaomi-courbet
@@ -142,8 +139,8 @@ jobs:
       - name: Write pmbootstrap config
         run: |
           set -e
-          sudo mkdir -p /home/pmuser/.config
-          sudo tee /home/pmuser/.config/pmbootstrap.cfg > /dev/null <<EOF
+          sudo mkdir -p /root/.config
+          sudo tee "$PMB_CFG" > /dev/null <<EOF
           [pmbootstrap]
           aports = $BUILD_DIR/pmaports
           device = ${{ github.event.inputs.device }}
@@ -158,40 +155,31 @@ jobs:
           hostname = courbet
           ccache_size = 0
           EOF
-          sudo chown pmuser:pmuser /home/pmuser/.config/pmbootstrap.cfg
-          sudo chmod 600 /home/pmuser/.config/pmbootstrap.cfg
+          sudo chmod 600 "$PMB_CFG"
 
       - name: pmbootstrap init
         run: |
           # `yes` dies with SIGPIPE once pmbootstrap stops reading stdin, which
-          # it does as soon as init finishes. Under the runner's `set -e` that
-          # aborted the step even though pmbootstrap had written the config and
-          # printed DONE. So: no errexit around the pipeline, and read the real
-          # exit status of pmbootstrap itself from PIPESTATUS.
+          # it does as soon as init finishes. That must not fail the step, so
+          # errexit is off around the pipeline and the real exit status comes
+          # from PIPESTATUS.
           set +e
-          yes '' | sudo -u pmuser -H env \
-            HOME=/home/pmuser \
-            XDG_CONFIG_HOME=/home/pmuser/.config \
-            bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
-                     -c /home/pmuser/.config/pmbootstrap.cfg \
-                     -w '$BUILD_DIR/work' init" 2>&1 | tee out/init.log
+          yes '' | sudo -H pmbootstrap --details-to-stdout -y --as-root \
+                     -c "$PMB_CFG" \
+                     -w "$BUILD_DIR/work" init 2>&1 | tee out/init.log
           rc=${PIPESTATUS[1]}
           set -e
           echo "pmbootstrap init exit: $rc"
           echo "--- config as it ended up ---"
-          sudo -u pmuser -H env HOME=/home/pmuser XDG_CONFIG_HOME=/home/pmuser/.config \
-            cat /home/pmuser/.config/pmbootstrap.cfg || true
+          sudo cat "$PMB_CFG" || true
           test "$rc" -eq 0
 
       - name: Build kernel package
         run: |
           set +e
-          sudo -u pmuser -H env \
-            HOME=/home/pmuser \
-            XDG_CONFIG_HOME=/home/pmuser/.config \
-            bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
-                     -c /home/pmuser/.config/pmbootstrap.cfg \
-                     -w '$BUILD_DIR/work' build '${{ github.event.inputs.kernel_pkg }}' --force" \
+          sudo -H pmbootstrap --details-to-stdout -y --as-root \
+                   -c "$PMB_CFG" \
+                   -w "$BUILD_DIR/work" build '${{ github.event.inputs.kernel_pkg }}' --force \
             2>&1 | tee out/kernel.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -201,15 +189,13 @@ jobs:
       - name: Install into chroot
         run: |
           set +e
-          yes '' | sudo -u pmuser -H env \
-            HOME=/home/pmuser \
-            XDG_CONFIG_HOME=/home/pmuser/.config \
-            bash -c "cd '$BUILD_DIR' && pmbootstrap --details-to-stdout -y \
-                     -c /home/pmuser/.config/pmbootstrap.cfg \
-                     -w '$BUILD_DIR/work' install --no-fde" 2>&1 | tee out/install.log
+          yes '' | sudo -H pmbootstrap --details-to-stdout -y --as-root \
+                     -c "$PMB_CFG" \
+                     -w "$BUILD_DIR/work" install --no-fde 2>&1 | tee out/install.log
           rc=${PIPESTATUS[1]}
           set -e
           echo "pmbootstrap install exit: $rc"
+          test "$rc" -eq 0
 
       - name: Collect kernel, initramfs, dtb
         run: |
