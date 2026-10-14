@@ -77,6 +77,10 @@ jobs:
                     "$PMB_REPO" /opt/pmb-src
           sudo /opt/pmb/bin/pip install --no-cache-dir /opt/pmb-src
           sudo ln -sf /opt/pmb/bin/pmbootstrap /usr/local/bin/pmbootstrap
+          # 3.4.x imports tomllib (Python 3.11+) with a tomli fallback, but the
+          # runner is Python 3.10 and pip did not pull the backport in, so the
+          # import chain dies here instead of inside pmbootstrap later.
+          sudo /opt/pmb/bin/pip install --no-cache-dir tomli
           /opt/pmb/bin/python - <<'PY'
           import pmb
           v = tuple(int(x) for x in pmb.__version__.split(".")[:3])
