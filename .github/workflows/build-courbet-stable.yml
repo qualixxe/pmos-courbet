@@ -14,8 +14,10 @@ name: Build pmOS for courbet (courbet_stable fork)
 #  - pmbootstrap's newest release on PyPI is 2.1.0, and this fork's
 #    pmaports.cfg sets pmbootstrap_min_version=2.3.2. read_config() refuses to
 #    continue below that, so pmbootstrap is installed from git rather than pip.
-#    Branch 2.3.x carries 2.3.3; the newer 3.x branches are not used here
-#    because the fork was written against the 2.3 line.
+#    Branch 2.3.x looks like the obvious choice and is wrong: its
+#    apk_tools_min_version table stops at v3.20, and this fork's channel v24.12
+#    is Alpine 3.21, so build dies with KeyError: 'v3.21'. 3.4.x is the first
+#    branch that has the entry.
 #  - the device's deviceinfo has no deviceinfo_kernel_flavor, so the default
 #    would be "mainline" and pmbootstrap would look for a kernel package that
 #    does not exist. The fork ships linux-postmarketos-qcom-sm7150, so the
@@ -29,9 +31,9 @@ on:
         required: false
         default: 'courbet_stable'
       pmbootstrap_branch:
-        description: 'pmbootstrap branch (2.3.x carries 2.3.3)'
+        description: 'pmbootstrap branch (3.4.x is the first that knows v3.21)'
         required: false
-        default: '2.3.x'
+        default: '3.4.x'
       device:
         description: 'pmOS device codename'
         required: false
