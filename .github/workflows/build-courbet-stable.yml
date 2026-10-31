@@ -242,7 +242,6 @@ jobs:
         run: |
           set -e
           python3 - <<'PY'
-          import json
           import struct
           import subprocess
 
@@ -260,14 +259,26 @@ jobs:
           assert d[ramdisk_offset:ramdisk_offset + 2] == b"\x1f\x8b", "invalid initramfs"
           cmdline = d[64:64 + 512].split(b"\0")[0].decode()
 
-          # The rootfs image is whole-disk GPT: p1 is boot, p2 is root.
+          # The rootfs image is whole-disk GPT: p1 is boot, p2 is root. Read the
+          # table directly because sfdisk rejects the image's protective MBR.
           rootfs = "out/rootfs-pmos-courbet.img"
-          table = json.loads(subprocess.check_output([
-              "sfdisk", "--json", rootfs
-          ], text=True))["partitiontable"]
-          assert len(table["partitions"]) == 2, "unexpected rootfs partition layout"
-          root = table["partitions"][1]
-          root_offset = root["start"] * table.get("sectorsize", 512)
+          with open(rootfs, "rb") as image:
+              image.seek(512)
+              header = image.read(92)
+              assert header[:8] == b"EFI PART", "rootfs has no GPT header"
+              entries_lba = struct.unpack_from("<Q", header, 72)[0]
+              entry_count = struct.unpack_from("<I", header, 80)[0]
+              entry_size = struct.unpack_from("<I", header, 84)[0]
+              image.seek(entries_lba * 512)
+              entries = image.read(entry_count * entry_size)
+          assert len(entries) == entry_count * entry_size, "truncated GPT entries"
+          partitions = [
+              entries[i * entry_size:(i + 1) * entry_size]
+              for i in range(entry_count)
+              if any(entries[i * entry_size:(i + 1) * entry_size][:16])
+          ]
+          assert len(partitions) == 2, "unexpected rootfs partition layout"
+          root_offset = struct.unpack_from("<Q", partitions[1], 32)[0] * 512
           rootfs_uuid = subprocess.check_output([
               "blkid", "-p", "-O", str(root_offset),
               "-s", "UUID", "-o", "value", rootfs
