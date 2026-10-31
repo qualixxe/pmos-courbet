@@ -29,8 +29,8 @@ download `pmos-courbet-stable`:
 The boot image and rootfs must come from the same artifact: the boot command
 line contains the UUID of that particular rootfs. CI verifies the match.
 
-The image is a minimal bring-up installation (`ui = none`), not a graphical
-desktop image.
+The image is a console installation (`ui = console`), not a graphical desktop
+image.
 
 ## Before booting
 

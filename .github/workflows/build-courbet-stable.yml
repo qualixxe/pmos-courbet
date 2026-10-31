@@ -157,7 +157,7 @@ jobs:
           work = $BUILD_DIR/work
           is_default_channel = False
           user = pm
-          ui = none
+          ui = console
           extra_packages = none
           locale = en_US.UTF-8
           timezone = GMT
@@ -171,9 +171,10 @@ jobs:
           # `yes` dies with SIGPIPE once pmbootstrap stops reading stdin, which
           # it does as soon as init finishes. That must not fail the step, so
           # errexit is off around the pipeline and the real exit status comes
-          # from PIPESTATUS.
+          # from PIPESTATUS. Do not add -y here: it also accepts the optional
+          # mirror setup, which starts an interactive mirror benchmark.
           set +e
-          yes '' | sudo -H pmbootstrap --details-to-stdout -y --as-root \
+          yes '' | sudo -H pmbootstrap --details-to-stdout --as-root \
                      -c "$PMB_CFG" \
                      -w "$BUILD_DIR/work" init 2>&1 | tee out/init.log
           rc=${PIPESTATUS[1]}
