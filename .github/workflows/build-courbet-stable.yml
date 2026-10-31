@@ -232,6 +232,7 @@ jobs:
         run: |
           set -e
           python3 - <<'PY'
+          import json
           import struct
           import subprocess
 
@@ -248,23 +249,49 @@ jobs:
           ramdisk_offset = page + (ks + page - 1) // page * page
           assert d[ramdisk_offset:ramdisk_offset + 2] == b"\x1f\x8b", "invalid initramfs"
           cmdline = d[64:64 + 512].split(b"\0")[0].decode()
+
+          # The rootfs image is whole-disk GPT: p1 is boot, p2 is root.
+          rootfs = "out/rootfs-pmos-courbet.img"
+          table = json.loads(subprocess.check_output([
+              "sfdisk", "--json", rootfs
+          ], text=True))["partitiontable"]
+          assert len(table["partitions"]) == 2, "unexpected rootfs partition layout"
+          root = table["partitions"][1]
+          root_offset = root["start"] * table.get("sectorsize", 512)
           rootfs_uuid = subprocess.check_output([
-              "blkid", "-s", "UUID", "-o", "value", "out/rootfs-pmos-courbet.img"
+              "blkid", "-p", "-O", str(root_offset),
+              "-s", "UUID", "-o", "value", rootfs
           ], text=True).strip()
-          assert rootfs_uuid, "rootfs has no UUID"
+          assert rootfs_uuid, "rootfs partition has no UUID"
           assert "pmos_root_uuid=" + rootfs_uuid in cmdline, "boot/rootfs UUID mismatch"
           print("page %d, kernel %d @0x%x, ramdisk %d @0x%x" % (page, ks, ka, rs, ra))
           print("appended courbet DTB: %d bytes" % len(dtb))
           print("cmdline: %r" % cmdline)
+          print("root partition offset: %d bytes" % root_offset)
           print("matching rootfs UUID: %s" % rootfs_uuid)
           print("boot image: %d bytes" % len(d))
           PY
 
-      - name: Upload
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          name: pmos-courbet-build-logs
+          path: out/*.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload verified images
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
           name: pmos-courbet-stable
-          path: out/
+          path: |
+            out/boot-pmos-courbet.img
+            out/rootfs-pmos-courbet.img
+            out/vmlinuz
+            out/initramfs
+            out/courbet.dtb
+            out/*.log
           if-no-files-found: error
           retention-days: 30

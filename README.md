@@ -27,7 +27,9 @@ download `pmos-courbet-stable`:
 - `init.log`, `kernel.log`, `install.log` — build logs.
 
 The boot image and rootfs must come from the same artifact: the boot command
-line contains the UUID of that particular rootfs. CI verifies the match.
+line contains the UUID of that particular rootfs. CI reads the UUID of the root
+partition inside the disk image and verifies the match. Failed runs expose
+`pmos-courbet-build-logs`; images are published only after this check passes.
 
 The image is a console installation (`ui = console`), not a graphical desktop
 image.
