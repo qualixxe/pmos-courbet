@@ -1,4 +1,4 @@
-name: Build postmarketOS payload for courbet
+name: Build experimental SM7150 payload (not courbet)
 
 # Why CI: pmbootstrap needs a real Linux to build chroots, and this host has
 # neither WSL nor usable virtualization. A GitHub runner already is one.
@@ -14,13 +14,6 @@ name: Build postmarketOS payload for courbet
 # the only delivery path that needs no USB-C OTG adapter.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'device/**'
-      - 'scripts/**'
-      - '.github/workflows/**'
-  pull_request:
   workflow_dispatch:
     inputs:
       device:

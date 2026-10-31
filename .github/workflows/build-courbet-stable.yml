@@ -61,6 +61,9 @@ on:
 env:
   BUILD_DIR: /root/pmbuild
   PMAPORTS_REPO: https://gitlab.postmarketos.org/kevinwidjaja21/pmaports
+  # The tip is an experimental 6.17 build without courbet's panel driver.
+  # This is the preceding 6.13.4 revision that explicitly enabled the display.
+  PMAPORTS_COMMIT: 9ed24e3091fe102319987aebf99c0e281ba24e19
   PMB_REPO: https://gitlab.postmarketos.org/postmarketOS/pmbootstrap
   PMB_CFG: /root/.config/pmbootstrap.cfg
 
@@ -101,13 +104,15 @@ jobs:
           assert v >= (2, 3, 2), "fork requires >= 2.3.2, got %s" % pmb.__version__
           PY
 
-      - name: Clone the courbet fork of pmaports
+      - name: Clone the stable courbet port
         run: |
           set -e
           sudo mkdir -p "$BUILD_DIR"
           sudo -H git clone --depth 1 \
             -b "${{ github.event.inputs.pmaports_branch }}" \
             "$PMAPORTS_REPO" "$BUILD_DIR/pmaports"
+          sudo -H git -C "$BUILD_DIR/pmaports" fetch --depth 1 origin "$PMAPORTS_COMMIT"
+          sudo -H git -C "$BUILD_DIR/pmaports" checkout -B courbet-stable-6.13 "$PMAPORTS_COMMIT"
 
           # ask_for_channel() runs
           #   git show <official-remote>/master:channels.cfg
@@ -125,10 +130,14 @@ jobs:
             git fetch -q --depth 1 origin master
             git update-ref refs/remotes/origin/master FETCH_HEAD
             git show origin/master:channels.cfg | head -5
-            echo \"branch : \$(git rev-parse --abbrev-ref HEAD) \$(git rev-parse --short HEAD)\"
+            echo \"branch : \$(git rev-parse --abbrev-ref HEAD) \$(git rev-parse HEAD)\"
+            test \"\$(git rev-parse HEAD)\" = '$PMAPORTS_COMMIT'
             echo '--- port and kernel aport ---'
             ls -d device/*/device-xiaomi-courbet
             ls -d device/*/linux-postmarketos-qcom-sm7150
+            grep -q '^pkgver=6.13.4$' device/*/linux-postmarketos-qcom-sm7150/APKBUILD
+            grep -q '^CONFIG_DRM_PANEL_K9A_36_02_0A=y$' \
+              device/*/linux-postmarketos-qcom-sm7150/config-postmarketos-qcom-sm7150.aarch64
             echo '--- pmaports.cfg ---'
             grep -E 'version|channel' pmaports.cfg
             echo '--- deviceinfo ---'
@@ -197,42 +206,57 @@ jobs:
           echo "pmbootstrap install exit: $rc"
           test "$rc" -eq 0
 
-      - name: Collect kernel, initramfs, dtb
+      - name: Collect boot image and matching rootfs
         run: |
           set -e
-          # Everything runs inside one sudo shell: $BUILD_DIR lives under /root,
-          # which the runner user cannot even traverse, so a runner-side glob
-          # like "$ROOT"/boot/vmlinuz* never expands and cp dies with "No such
-          # file". pmbootstrap's install already laid out a complete boot.img
-          # (deviceinfo_generate_bootimg=true), so take it as the artifact and
-          # keep the components for inspection.
+          # pmbootstrap writes the rootfs outside the device chroot. Both images
+          # must come from this same install: boot.img carries the rootfs UUID.
           sudo bash -c "
             set -e
             ROOT=\$(find '$BUILD_DIR/work' -maxdepth 1 -name 'chroot_rootfs_*' | head -1)
+            ROOTFS='$BUILD_DIR/work/chroot_native/home/pmos/rootfs/${{ github.event.inputs.device }}.img'
             echo \"chroot: \$ROOT\"
             ls -la \"\$ROOT/boot\"
+            test -s \"\$ROOTFS\"
             cp \"\$ROOT\"/boot/boot.img out/boot-pmos-courbet.img
+            cp \"\$ROOTFS\" out/rootfs-pmos-courbet.img
             cp \"\$ROOT\"/boot/vmlinuz out/vmlinuz
             cp \"\$ROOT\"/boot/initramfs out/initramfs
             cp \"\$ROOT\"/boot/*courbet*.dtb out/courbet.dtb
           "
           sudo chown runner:runner out/*
-          ls -la out
+          ls -lh out
 
-      - name: Verify the image layout
+      - name: Verify boot image, DTB and rootfs pairing
         run: |
           set -e
           python3 - <<'PY'
           import struct
+          import subprocess
+
           d = open("out/boot-pmos-courbet.img", "rb").read()
+          dtb = open("out/courbet.dtb", "rb").read()
           assert d[:8] == b"ANDROID!", "not a boot image"
+          assert dtb[:4] == b"\xd0\x0d\xfe\xed", "invalid DTB"
           ks, ka, rs, ra = struct.unpack_from("<4I", d, 8)
           page = struct.unpack_from("<I", d, 36)[0]
-          print("magic ok, page %d, kernel %d @0x%x, ramdisk %d @0x%x" % (page, ks, ka, rs, ra))
-          print("kernel gzip: %s" % (d[page:page + 2] == b"\x1f\x8b"))
-          print("cmdline: %r" % d[64:64 + 512].split(b"\0")[0].decode())
-          print("dtb-len@1648: %d" % struct.unpack_from("<I", d, 1648)[0])
-          print("total image: %d bytes" % len(d))
+          kernel = d[page:page + ks]
+          assert kernel[:2] == b"\x1f\x8b", "kernel is not gzip compressed"
+          assert kernel.endswith(dtb), "courbet DTB is not appended to the kernel"
+          assert len(kernel) > len(dtb), "kernel payload is missing"
+          ramdisk_offset = page + (ks + page - 1) // page * page
+          assert d[ramdisk_offset:ramdisk_offset + 2] == b"\x1f\x8b", "invalid initramfs"
+          cmdline = d[64:64 + 512].split(b"\0")[0].decode()
+          rootfs_uuid = subprocess.check_output([
+              "blkid", "-s", "UUID", "-o", "value", "out/rootfs-pmos-courbet.img"
+          ], text=True).strip()
+          assert rootfs_uuid, "rootfs has no UUID"
+          assert "pmos_root_uuid=" + rootfs_uuid in cmdline, "boot/rootfs UUID mismatch"
+          print("page %d, kernel %d @0x%x, ramdisk %d @0x%x" % (page, ks, ka, rs, ra))
+          print("appended courbet DTB: %d bytes" % len(dtb))
+          print("cmdline: %r" % cmdline)
+          print("matching rootfs UUID: %s" % rootfs_uuid)
+          print("boot image: %d bytes" % len(d))
           PY
 
       - name: Upload

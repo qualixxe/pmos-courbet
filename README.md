@@ -1,143 +1,112 @@
-# postmarketOS payload for Xiaomi Mi 11 Lite 4G (courbet)
+# postmarketOS for Xiaomi Mi 11 Lite 4G (courbet)
 
-Builds a postmarketOS kernel + initramfs in CI and packages it as an Android
-boot image that can be started with `fastboot boot`.
+CI builds the out-of-tree `xiaomi-courbet` port with Linux 6.13.4 and produces a
+boot image plus the matching rootfs image. The port targets the Snapdragon 732G
+(SM7150-AC), not SM7325.
 
-## Why fastboot boot
+## Why the pmaports revision is pinned
 
-The UEFI built in `edk2-sm7150` reads **only USB Mass Storage with FAT32**:
+The workflow uses `kevinwidjaja21/pmaports` at commit
+`9ed24e3091fe102319987aebf99c0e281ba24e19` (`courbet_stable` before its tip).
+That revision contains the courbet display enablement and builds
+`CONFIG_DRM_PANEL_K9A_36_02_0A=y` into the kernel.
 
-```
-MdeModulePkg/Bus/Usb/UsbMassStorageDxe   USB storage
-MdeModulePkg/Universal/Disk/DiskIoDxe    block I/O
-MdeModulePkg/Universal/Disk/PartitionDxe GPT/MBR
-FatPkg/EnhancedFatDxe                    FAT32
-```
+The following commit, `e78c27e`, is explicitly named `DO NOT MERGE test packed
+kernel 6.17` and disables that panel driver. Building the moving tip therefore
+produces an image that can boot without any visible output. CI checks both the
+revision and the panel option before starting the kernel build.
 
-There is no UFS driver — Qualcomm UFS is a proprietary controller that is not
-on PCI, so the firmware cannot see the phone's own storage. The network stack
-is compiled out as well:
+## Artifacts
 
-```
-#!include NetworkPkg/Network.fdf.inc      disabled
-```
+Run **Build pmOS for courbet (courbet_stable fork)** from the Actions tab and
+download `pmos-courbet-stable`:
 
-Nothing can therefore be loaded from a partition or a USB stick. That is what
-blocked the earlier Windows attempt, which needed a USB-C OTG adapter that was
-not available.
+- `boot-pmos-courbet.img` — kernel, courbet DTB and postmarketOS initramfs;
+- `rootfs-pmos-courbet.img` — the matching root filesystem;
+- `vmlinuz`, `initramfs`, `courbet.dtb` — unpacked components for inspection;
+- `init.log`, `kernel.log`, `install.log` — build logs.
 
-`fastboot boot` sidesteps it entirely: the image is pushed into RAM over USB
-and started, without a partition being written. postmarketOS supports this
-natively via `pmbootstrap flasher boot`, and its initramfs is self contained,
-so no storage is needed at runtime either.
+The boot image and rootfs must come from the same artifact: the boot command
+line contains the UUID of that particular rootfs. CI verifies the match.
 
-## Why not gitlab.postmarketos.org
+The image is a minimal bring-up installation (`ui = none`), not a graphical
+desktop image.
 
-It is behind **Anubis**, a proof-of-work anti-scraping gate that requires
-JavaScript. Automated clients receive the challenge page instead of a git
-stream, and the clone fails. That is what killed the first run of this
-workflow — not a missing package.
+## Before booting
 
-Both dependencies are therefore sourced elsewhere:
+The bootloader must be unlocked and the phone should run the latest stock
+firmware for courbet.
 
-| Need | Source |
-|---|---|
-| pmbootstrap | PyPI, `pip install pmbootstrap` (2.1.0) |
-| pmaports | `github.com/sm7150-mainline/pmaports`, branch `generic` |
+**The stock DTBO must not be applied to the mainline DTB.** Erasing `dtbo` is a
+requirement of this port even when using `fastboot boot`; loading boot.img over
+USB does not bypass DTBO processing. Android needs the original DTBO restored
+to boot again.
 
-## What actually exists for this SoC
+Back up DTBO first. Run `dd` in a rooted Android shell, then run `adb pull` on
+the PC:
 
-There **is** a mainline SM7150 port. In the mirror:
-
-```
-device/community/device-xiaomi-surya        device port
-device/community/device-qcom-sm7150          SoC port
-device/community/linux-postmarketos-qcom-sm7150   kernel package
-device/community/firmware-xiaomi-surya       firmware
+```sh
+dd if=/dev/block/by-name/dtbo of=/sdcard/dtbo.img
 ```
 
-surya is a close relative of courbet: same SM7150 family, and the port even
-declares the same panel.
-
-```
-deviceinfo_screen_width="1080"
-deviceinfo_screen_height="2400"
-deviceinfo_dtb="qcom/sm7150-xiaomi-surya-huaating"
+```sh
+adb pull /sdcard/dtbo.img
 ```
 
-But the SoC port is declared as:
-
-```
-deviceinfo_device_type="ref"
-```
-
-In postmarketOS that marks a **reference configuration kept for CI tests**, not
-a device anyone has verified boots. So the honest position is:
-
-- SM7325 mainline work is real and in progress — Nura's first announced targets
-  are SM7325 devices, so the effort exists
-- the SM7150 port here is a test fixture, not a working phone port
-- **no `courbet` port exists**
-
-## Why a failed boot will be silent
-
-```
-deviceinfo_getty="ttyMSM0;115200;n8"
-```
-
-The console is UART. The firmware exposes no USB while it runs, and this
-phone's UART pads need a USB-TTL adapter to tap. So a kernel that starts
-without a panel produces no observable output at all — neither a screen nor a
-log. Expect a black screen, and expect to learn only that it got that far.
-
-## What the workflow does
-
-```
-Resolve target        -> xiaomi-surya by default
-Install deps
-Install pmbootstrap   -> PyPI
-Fetch pmaports        -> GitHub mirror, reports what it found
-Create build user
-Report maturity       -> prints the target's deviceinfo and warns when the SoC
-                         port is device_type="ref"
-pmbootstrap init
-pmbootstrap build
-Package               -> boot.img + 128 MiB padded variant
-Upload
-```
-
-The maturity step exists so the "this is a reference port, not a working port"
-caveat is re-read from the mirror on every run instead of going stale in a
-README.
-
-Switch target from the Actions tab (**Run workflow → `device`**).
-
-## Using the result
+Then enter fastboot mode and erase DTBO. This changes the device and is not a
+read-only test:
 
 ```powershell
 $fb = "C:\Users\qualixxe\Downloads\platform-tools\fastboot.exe"
-# power off, then hold Vol Down + Power to reach fastboot
 & $fb devices
-& $fb boot boot-pmos.img
+& $fb erase dtbo
 ```
 
-Nothing is written. If the kernel does not come up, power-cycle back into
-fastboot and try the next build; `fastboot boot` leaves no trace.
+To restore the backup later:
 
-## Layout
-
-```
-.github/workflows/build-pmos.yml   build in CI, package, report support status
-device/courbet.deviceinfo          device definition for a future courbet port
-scripts/mkbootimg.py               wrap kernel + initramfs + dtb into a boot image
+```powershell
+& $fb flash dtbo .\dtbo.img
 ```
 
-`mkbootimg.py` writes the header itself rather than shelling out to `mkbootimg`,
-and uses the Xiaomi/SM7150 convention seen in the stock image: header_version 0,
-device tree appended after the ramdisk with its length at offset 1648.
+## Test kernel and initramfs
 
-## Requirements
+After erasing DTBO, the boot image can be loaded without flashing the boot
+partition:
 
-None locally. The build needs no Linux host because CI runs it; testing needs
-only `fastboot`, already present at
-`C:\Users\qualixxe\Downloads\platform-tools\fastboot.exe`.
+```powershell
+& $fb boot .\boot-pmos-courbet.img
+```
+
+This tests the kernel, panel, DTB, USB and initramfs. It is not a complete
+installation: without the matching rootfs on `userdata`, initramfs cannot
+switch to the installed system.
+
+## Full installation
+
+**Flashing `userdata` destroys its current contents, including Android user
+data. Back up everything needed first.**
+
+```powershell
+& $fb flash userdata .\rootfs-pmos-courbet.img
+& $fb boot .\boot-pmos-courbet.img
+```
+
+For a permanent installation, flash the same boot image to `boot` instead of
+using `fastboot boot`. Do not mix images from different CI artifacts.
+
+## Build details
+
+The stable workflow installs pmbootstrap 3.4.x, checks out the pinned courbet
+port, builds `linux-postmarketos-qcom-sm7150`, runs `pmbootstrap install
+--no-fde`, and validates:
+
+- Android boot-image and gzip signatures;
+- the courbet DTB appended to the kernel;
+- the initramfs gzip signature;
+- the rootfs UUID against `pmos_root_uuid` in boot.img.
+
+The older `build-pmos.yml` workflow is an unrelated experimental SM7150/surya
+payload builder, not the supported courbet installation path.
+
+Upstream device instructions and hardware status:
+<https://wiki.nura.eco/wiki/Xiaomi_Mi_11_Lite_4G_(xiaomi-courbet)>.
