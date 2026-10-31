@@ -57,9 +57,14 @@ on:
         description: 'kernel cmdline (deviceinfo says console=null, so blank)'
         required: false
         default: ''
+      user_password:
+        description: 'temporary password for user pm (test image only)'
+        required: false
+        default: '147147'
 
 env:
   BUILD_DIR: /root/pmbuild
+  PMB_USER_PASSWORD: ${{ github.event.inputs.user_password }}
   PMAPORTS_REPO: https://gitlab.postmarketos.org/kevinwidjaja21/pmaports
   # The tip is an experimental 6.17 build without courbet's panel driver.
   # This is the preceding 6.13.4 revision that explicitly enabled the display.
@@ -197,12 +202,17 @@ jobs:
           test "$rc" -eq 0
 
       - name: Install into chroot
+        timeout-minutes: 120
         run: |
+          # Without --password, pmbootstrap calls passwd in a retry loop. With
+          # stdin from `yes ''`, that loop never succeeds and runs until the
+          # job timeout.
           set +e
-          yes '' | sudo -H pmbootstrap --details-to-stdout -y --as-root \
-                     -c "$PMB_CFG" \
-                     -w "$BUILD_DIR/work" install --no-fde 2>&1 | tee out/install.log
-          rc=${PIPESTATUS[1]}
+          sudo -H pmbootstrap --details-to-stdout -y --as-root \
+                   -c "$PMB_CFG" \
+                   -w "$BUILD_DIR/work" install --no-fde \
+                   --password "$PMB_USER_PASSWORD" 2>&1 | tee out/install.log
+          rc=${PIPESTATUS[0]}
           set -e
           echo "pmbootstrap install exit: $rc"
           test "$rc" -eq 0

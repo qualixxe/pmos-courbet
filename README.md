@@ -32,7 +32,8 @@ partition inside the disk image and verifies the match. Failed runs expose
 `pmos-courbet-build-logs`; images are published only after this check passes.
 
 The image is a console installation (`ui = console`), not a graphical desktop
-image.
+image. The user `pm` gets the temporary password from the `user_password`
+workflow input (default `147147`); change it after the first login.
 
 ## Before booting
 
