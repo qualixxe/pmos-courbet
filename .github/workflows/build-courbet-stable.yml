@@ -239,14 +239,28 @@ jobs:
           ls -lh out
 
       - name: Verify boot image, DTB and rootfs pairing
+        env:
+          DEVICE: ${{ github.event.inputs.device }}
         run: |
           set -e
+          # courbet's rootfs image uses 4096-byte sectors, so its GPT begins at
+          # byte 4096. Take the value from the port instead of assuming 512.
+          ROOTFS_SECTOR_SIZE=$(
+            sudo bash -c '
+              set -e
+              deviceinfo=$(find "$BUILD_DIR/pmaports/device" -type f -path "*/device-${DEVICE}/deviceinfo" -print -quit)
+              sed -n "s/^deviceinfo_rootfs_image_sector_size=\"\([0-9]\+\)\"$/\1/p" "$deviceinfo" | head -1
+            ' || true
+          )
+          export ROOTFS_SECTOR_SIZE="${ROOTFS_SECTOR_SIZE:-512}"
           python3 - <<'PY'
+          import os
           import struct
           import subprocess
 
           d = open("out/boot-pmos-courbet.img", "rb").read()
           dtb = open("out/courbet.dtb", "rb").read()
+          sector_size = int(os.environ["ROOTFS_SECTOR_SIZE"])
           assert d[:8] == b"ANDROID!", "not a boot image"
           assert dtb[:4] == b"\xd0\x0d\xfe\xed", "invalid DTB"
           ks, ka, rs, ra = struct.unpack_from("<4I", d, 8)
@@ -259,17 +273,16 @@ jobs:
           assert d[ramdisk_offset:ramdisk_offset + 2] == b"\x1f\x8b", "invalid initramfs"
           cmdline = d[64:64 + 512].split(b"\0")[0].decode()
 
-          # The rootfs image is whole-disk GPT: p1 is boot, p2 is root. Read the
-          # table directly because sfdisk rejects the image's protective MBR.
+          # The rootfs image is whole-disk GPT: p1 is boot, p2 is root.
           rootfs = "out/rootfs-pmos-courbet.img"
           with open(rootfs, "rb") as image:
-              image.seek(512)
+              image.seek(sector_size)
               header = image.read(92)
               assert header[:8] == b"EFI PART", "rootfs has no GPT header"
               entries_lba = struct.unpack_from("<Q", header, 72)[0]
               entry_count = struct.unpack_from("<I", header, 80)[0]
               entry_size = struct.unpack_from("<I", header, 84)[0]
-              image.seek(entries_lba * 512)
+              image.seek(entries_lba * sector_size)
               entries = image.read(entry_count * entry_size)
           assert len(entries) == entry_count * entry_size, "truncated GPT entries"
           partitions = [
@@ -278,7 +291,7 @@ jobs:
               if any(entries[i * entry_size:(i + 1) * entry_size][:16])
           ]
           assert len(partitions) == 2, "unexpected rootfs partition layout"
-          root_offset = struct.unpack_from("<Q", partitions[1], 32)[0] * 512
+          root_offset = struct.unpack_from("<Q", partitions[1], 32)[0] * sector_size
           rootfs_uuid = subprocess.check_output([
               "blkid", "-p", "-O", str(root_offset),
               "-s", "UUID", "-o", "value", rootfs
@@ -288,6 +301,7 @@ jobs:
           print("page %d, kernel %d @0x%x, ramdisk %d @0x%x" % (page, ks, ka, rs, ra))
           print("appended courbet DTB: %d bytes" % len(dtb))
           print("cmdline: %r" % cmdline)
+          print("rootfs sector size: %d bytes" % sector_size)
           print("root partition offset: %d bytes" % root_offset)
           print("matching rootfs UUID: %s" % rootfs_uuid)
           print("boot image: %d bytes" % len(d))
